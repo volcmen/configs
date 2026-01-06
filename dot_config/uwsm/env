@@ -1,0 +1,50 @@
+######## Toolkit Backend Variables ########
+
+# See https://wiki.hypr.land/Configuring/Environment-variables/#toolkit-backend-variables
+
+# export GDK_BACKEND="wayland x11 *"
+# export QT_QPA_PLATFORM="wayland;xcb"
+export SDL_VIDEODRIVER=wayland
+
+
+######## XDG Specifications ########
+
+# See https://wiki.hypr.land/Configuring/Environment-variables/#xdg-specifications
+
+export XDG_CURRENT_DESKTOP=Hyprland
+export XDG_SESSION_TYPE=wayland
+export XDG_SESSION_DESKTOP=Hyprland
+
+
+######## Qt Variables ########
+
+# See https://wiki.hypr.land/Configuring/Environment-variables/#qt-variables
+
+export QT_WAYLAND_DISABLE_WINDOWDECORATION=1 # Disables window decorations on Qt applications
+
+######## NVIDIA Specific ########
+
+# See https://wiki.hypr.land/Configuring/Environment-variables/#nvidia-specific
+
+export __GLX_VENDOR_LIBRARY_NAME=nvidia # Force GBM as a backend
+export GBM_BACKEND=nvidia-drm
+export LIBVA_DRIVER_NAME=nvidia # Hardware acceleration on NVIDIA GPUs
+export NVD_BACKEND=direct # VA-API hardware video acceleration
+
+
+######## Theming Related Variables ########
+
+# See https://wiki.hypr.land/Configuring/Environment-variables/#theming-related-variables
+
+export XCURSOR_THEME="Bibata-Modern-Classic"
+export XCURSOR_SIZE=24
+
+
+######## Other Applications ########
+
+# Firefox
+export MOZ_ENABLE_WAYLAND=1 # Force Firefox to use Wayland
+
+# Electron
+export ELECTRON_OZONE_PLATFORM_HINT=auto
+

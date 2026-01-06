@@ -1,0 +1,9 @@
+######## Hyprland Environment Variables ########
+
+# See https://wiki.hypr.land/Configuring/Environment-variables/#hyprland-environment-variables
+
+export HYPRLAND_TRACE=0
+export HYPRCURSOR_THEME="Bibata-Modern-Classic"
+export HYPRCURSOR_SIZE=24
+
+export AQ_TRACE=0
