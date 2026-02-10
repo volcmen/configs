@@ -1,0 +1,58 @@
+log_level = "warn"
+outputs = "All"
+position = "Top"
+
+[modules]
+left = [ "WindowTitle" ]
+center = [ "SystemInfo", "Workspaces", "Clock" ]
+right = [ "Tray", "KeyboardLayout", "Privacy", "Settings" ]
+
+[keyboard_layout.labels]
+"English (US)" = "en"
+"Russian" = "ru"
+
+[workspaces]
+enable_workspace_filling = true
+max_workspaces = 10
+
+[window_title]
+truncate_title_after_length = 50
+
+[media_player]
+max_title_length = 50
+
+[clock]
+format = "%a %d %b • %I:%M %p"
+
+[settings]
+lock_cmd = "loginctl lock-session"
+logout_cmd = "loginctl kill-session $XDG_SESSION_ID"
+audio_sinks_more_cmd = "kitty -1 wiremix --tab output"
+audio_sources_more_cmd = "kitty -1 wiremix --tab input"
+wifi_more_cmd = "kitty -1 impala"
+vpn_more_cmd = "nm-connection-editor"
+bluetooth_more_cmd = "kitty -1 bluetui"
+remove_airplane_btn = true
+indicators = ["IdleInhibitor", "Audio", "Bluetooth", "Network", "Vpn"]
+
+[appearance]
+style = "Solid"
+scale_factor = 1.2
+
+primary_color = "#7aa2f7"
+success_color = "#9ece6a"
+text_color = "#a9b1d6"
+
+workspace_colors = [ "#7aa2f7", "#9ece6a" ]
+
+[appearance.danger_color]
+base = "#f7768e"
+weak = "#e0af68"
+
+[appearance.background_color]
+base = "#1a1b26"
+weak = "#24273a"
+strong = "#414868"
+
+[appearance.secondary_color]
+base = "#0c0d14"
