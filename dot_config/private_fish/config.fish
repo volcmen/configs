@@ -25,6 +25,13 @@ if status is-interactive
     # Shorthands
     alias nv nvim
     alias lg lazygit
+
+    # Dev workflow
+    alias gst 'git status'
+    alias gd 'git diff'
+    alias gco 'git checkout'
+    alias gl 'git log --oneline -20'
+    alias ports 'ss -tulnp'
 end
 
 # No greeting
