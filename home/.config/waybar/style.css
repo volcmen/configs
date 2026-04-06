@@ -1,0 +1,335 @@
+/* Waybar style — TokyoNight palette from ashell config.toml */
+
+/* ── Palette ──────────────────────────────────────────────────────────────── */
+/* primary:    #7aa2f7  (blue)                                                 */
+/* success:    #9ece6a  (green)                                                */
+/* text:       #a9b1d6                                                         */
+/* danger:     #f7768e  (red)                                                  */
+/* warning:    #e0af68  (yellow)                                               */
+/* bg.base:    #1a1b26                                                         */
+/* bg.weak:    #24273a                                                         */
+/* bg.strong:  #414868                                                         */
+/* secondary:  #0c0d14                                                         */
+
+* {
+    /* Inter for text, JetBrainsMono NF for nerd font icons, emoji fallback */
+    font-family: "Inter", "JetBrainsMono Nerd Font", "Noto Color Emoji", sans-serif;
+    font-size: 16px;
+    font-weight: 400;
+    min-height: 0;
+    border: none;
+    border-radius: 0;
+}
+
+/* Icons-only elements use the nerd font directly for correct glyph sizing */
+#idle_inhibitor,
+#pulseaudio,
+#bluetooth,
+#network,
+#custom-internet,
+#custom-vpn,
+#custom-power,
+#privacy {
+    font-family: "JetBrainsMono Nerd Font", "Inter", sans-serif;
+}
+
+/* ── Bar ──────────────────────────────────────────────────────────────────── */
+
+window#waybar {
+    background-color: #1a1b26;
+    color: #a9b1d6;
+    border-bottom: 1px solid rgba(65, 72, 104, 0.45);
+}
+
+.modules-left,
+.modules-center,
+.modules-right {
+    padding: 0 8px;
+}
+
+/* ── All modules ──────────────────────────────────────────────────────────── */
+
+.module {
+    padding: 0 10px;
+    color: #a9b1d6;
+}
+
+/* ── Workspaces ───────────────────────────────────────────────────────────── */
+
+#workspaces {
+    background: linear-gradient(180deg, rgba(44, 48, 72, 0.95), rgba(30, 34, 51, 0.95));
+    border: 1px solid rgba(122, 162, 247, 0.18);
+    border-radius: 12px;
+    margin: 5px 6px;
+    padding: 3px 7px;
+}
+
+#workspaces button {
+    min-width: 0;
+    padding: 0 12px;
+    color: #6f7896;
+    background: transparent;
+    border-radius: 9px;
+    transition: all 0.15s ease;
+    font-weight: 700;
+}
+
+#workspaces button:hover {
+    background: rgba(122, 162, 247, 0.12);
+    color: #c0caf5;
+}
+
+#workspaces button.active {
+    color: #c0caf5;
+    background: linear-gradient(180deg, rgba(122, 162, 247, 0.22), rgba(122, 162, 247, 0.14));
+    box-shadow: inset 0 0 0 1px rgba(122, 162, 247, 0.32);
+}
+
+#workspaces button.urgent {
+    color: #f7768e;
+    background: rgba(247, 118, 142, 0.12);
+}
+
+#workspaces button.occupied {
+    color: #a9b1d6;
+}
+
+#workspaces button.empty {
+    color: #565f89;
+}
+
+#workspaces button.visible {
+    color: #a9b1d6;
+    background: rgba(169, 177, 214, 0.08);
+}
+
+#workspaces button label {
+    font-family: "JetBrainsMono Nerd Font", "Inter", sans-serif;
+    font-size: 15px;
+    letter-spacing: 0.25px;
+}
+
+/* ── Clock ────────────────────────────────────────────────────────────────── */
+
+#clock {
+    color: #a9b1d6;
+    padding: 0 14px;
+    font-weight: 500;
+    letter-spacing: 0.3px;
+    margin: 5px 0;
+    background: rgba(36, 39, 58, 0.88);
+    border: 1px solid rgba(65, 72, 104, 0.4);
+    border-radius: 10px;
+}
+
+/* ── Window title ─────────────────────────────────────────────────────────── */
+
+#window {
+    color: #a9b1d6;
+    font-weight: 400;
+    margin: 5px 0;
+    padding: 0 14px;
+    background: rgba(36, 39, 58, 0.82);
+    border: 1px solid rgba(65, 72, 104, 0.32);
+    border-radius: 10px;
+}
+
+/* ── CPU / Memory ─────────────────────────────────────────────────────────── */
+
+#cpu {
+    color: #7aa2f7;
+    min-width: 72px;
+    padding: 0 12px;
+    margin: 5px 0;
+    background: rgba(36, 39, 58, 0.9);
+    border: 1px solid rgba(122, 162, 247, 0.14);
+    border-radius: 10px;
+    font-weight: 600;
+}
+
+#memory {
+    color: #9ece6a;
+    min-width: 76px;
+    padding: 0 12px 0 10px;
+    margin: 5px 0;
+    background: rgba(36, 39, 58, 0.9);
+    border: 1px solid rgba(158, 206, 106, 0.14);
+    border-radius: 10px;
+    font-weight: 600;
+}
+
+#cpu.warning,
+#memory.warning {
+    color: #e0af68;
+}
+
+#cpu.critical,
+#memory.critical {
+    color: #f7768e;
+}
+
+/* ── System tray ──────────────────────────────────────────────────────────── */
+
+#tray {
+    padding: 0 10px;
+    margin: 5px 0;
+    background: rgba(36, 39, 58, 0.82);
+    border: 1px solid rgba(65, 72, 104, 0.3);
+    border-radius: 10px;
+}
+
+#tray > .passive {
+    -gtk-icon-effect: dim;
+}
+
+#tray > .needs-attention {
+    -gtk-icon-effect: highlight;
+    background-color: #f7768e;
+}
+
+/* ── Language ─────────────────────────────────────────────────────────────── */
+
+#language {
+    color: #a9b1d6;
+    margin-left: 2px;
+}
+
+/* ── Idle inhibitor ───────────────────────────────────────────────────────── */
+
+#idle_inhibitor {
+    color: #414868;
+}
+
+#idle_inhibitor.activated {
+    color: #e0af68;
+}
+
+/* ── Audio ────────────────────────────────────────────────────────────────── */
+
+#pulseaudio {
+    color: #a9b1d6;
+}
+
+#pulseaudio.muted {
+    color: #414868;
+}
+
+#pulseaudio.source,
+#pulseaudio.source-muted {
+    color: #9ece6a;
+}
+
+/* ── Bluetooth ────────────────────────────────────────────────────────────── */
+
+#bluetooth {
+    color: #7aa2f7;
+}
+
+#bluetooth.off,
+#bluetooth.disabled {
+    color: #414868;
+}
+
+/* ── Network ──────────────────────────────────────────────────────────────── */
+
+#network {
+    color: #a9b1d6;
+}
+
+#privacy,
+#language,
+#idle_inhibitor,
+#pulseaudio,
+#bluetooth,
+#network,
+#custom-vpn,
+#custom-power {
+    margin: 5px 0 5px 4px;
+    padding: 0 11px;
+    background: rgba(36, 39, 58, 0.82);
+    border: 1px solid rgba(65, 72, 104, 0.28);
+    border-radius: 10px;
+}
+
+#network.wifi,
+#network.ethernet {
+    color: #a9b1d6;
+}
+
+#network.disconnected,
+#network.linked {
+    color: #f7768e;
+}
+
+/* ── Internet check ───────────────────────────────────────────────────────── */
+
+#custom-internet {
+    padding: 0 4px 0 0;
+    font-size: 11px;
+}
+
+#custom-internet.full {
+    color: #9ece6a;
+}
+
+#custom-internet.limited {
+    color: #e0af68;
+}
+
+#custom-internet.none {
+    color: #f7768e;
+}
+
+/* ── VPN ──────────────────────────────────────────────────────────────────── */
+
+#custom-vpn {
+    color: #9ece6a;
+}
+
+/* ── Privacy ──────────────────────────────────────────────────────────────── */
+
+#privacy {
+    padding: 0 8px;
+}
+
+#privacy-item.screenshare {
+    color: #e0af68;
+}
+
+#privacy-item.audio-in {
+    color: #f7768e;
+}
+
+/* ── Power ────────────────────────────────────────────────────────────────── */
+
+#custom-power {
+    color: #414868;
+    padding: 0 12px 0 10px;
+    transition: color 0.15s ease;
+}
+
+#custom-power:hover {
+    color: #f7768e;
+}
+
+/* ── Power menu popup ─────────────────────────────────────────────────────── */
+
+menu {
+    background-color: #1a1b26;
+    border: 1px solid #414868;
+    border-radius: 8px;
+    padding: 4px 0;
+    color: #a9b1d6;
+    font-size: 13px;
+}
+
+menuitem {
+    padding: 6px 16px;
+    border-radius: 4px;
+    transition: background 0.1s ease;
+}
+
+menuitem:hover {
+    background-color: #24273a;
+    color: #c0caf5;
+}

@@ -4,6 +4,12 @@ if status is-interactive
     starship init fish | source
     zoxide init fish | source
 
+    # Only auto-start zellij inside kitty sessions.
+    if set -q KITTY_PID
+        set -gx ZELLIJ_AUTO_EXIT true
+        eval (zellij setup --generate-auto-start fish | string collect)
+    end
+
     function y
         set tmp (mktemp -t "yazi-cwd.XXXXXX")
         command yazi $argv --cwd-file="$tmp"
@@ -25,6 +31,7 @@ if status is-interactive
     # Shorthands
     alias nv nvim
     alias lg lazygit
+    alias clauded "claude --dangerously-skip-permissions"
 end
 
 # No greeting

@@ -1,0 +1,34 @@
+[user]
+	name = volcmen
+	email = volcmen@gmail.com
+
+[init]
+  defaultBranch = main
+
+[core]
+  editor = nvim
+  autocrlf = input
+  pager = delta
+
+[pull]
+	rebase = true
+
+[push]
+	autoSetupRemote = true   # Automatically set upstream branch on push
+  default = simple
+
+[merge]
+  conflictStyle = zdiff3
+
+[help]
+  autocorrect = prompt
+
+[interactive]
+    diffFilter = delta --color-ony
+
+[delta]
+    hyperlinks = true
+    side-by-side = true
+    navigate = true  # use n and N to move between diff sections
+    dark = true      # or light = true, or omit for auto-detection
+    line-numbers = true

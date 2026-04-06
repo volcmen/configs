@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+
+  <!-- ClearType-like defaults -->
+  <match target="font">
+    <edit name="antialias" mode="assign">
+      <bool>true</bool>
+    </edit>
+    <edit name="hinting" mode="assign">
+      <bool>true</bool>
+    </edit>
+
+    <!-- Try "hintslight" first for natural shapes.
+         If you want maximum crispness, change to "hintfull". -->
+    <edit name="hintstyle" mode="assign">
+      <const>hintslight</const>
+    </edit>
+
+    <!-- Subpixel AA (ClearType-like). If you see fringing, try "bgr". -->
+    <edit name="rgba" mode="assign">
+      <const>rgb</const>
+    </edit>
+
+    <!-- LCD filter reduces color shimmer -->
+    <edit name="lcdfilter" mode="assign">
+      <const>lcddefault</const>
+    </edit>
+  </match>
+
+</fontconfig>
+

@@ -1,76 +1,27 @@
-# My Dotfiles
+# Dotfiles
 
-Welcome to my personal configuration files repository. These dotfiles are managed using [chezmoi](https://www.chezmoi.io/), a powerful and secure dotfile manager.
+Personal configuration files managed with [**doti**](https://github.com/volcmen/doti).
 
-## Contents
-
-This repository contains configurations
-
-## Installation
-
-### 1. Install `chezmoi`
-
-If you haven't already, install `chezmoi` using your package manager.
-
-**Arch Linux:**
-```bash
-sudo pacman -S chezmoi
-```
-
-### 2. Initialize and Apply
-
-To apply these dotfiles to your system, run:
-
-```bash
-chezmoi init --apply https://github.com/volcmen/configs.git
+## Structure
 
 ```
-If you have already cloned this repo manually:
-```bash
-chezmoi init
-chezmoi apply
+home/           Mirrors $HOME — all config files live here
+  .config/        ~/.config/ configs (hypr, kitty, fish, etc.)
+  .bashrc         Root-level dotfiles
+  .local/         ~/.local/ files
 ```
 
-## Usage
+## Setup
 
-Here are some common `chezmoi` commands to manage your dotfiles:
-
-### Apply changes
-Pull the latest changes from the repo and apply them to your home directory:
 ```bash
-chezmoi update
+git clone https://github.com/volcmen/configs.git ~/Development/personal/configs
 ```
 
-### Edit a config file
-To edit a file (e.g., `~/.config/kitty/kitty.conf`), don't edit it directly. Instead, use:
-```bash
-chezmoi edit ~/.config/kitty/kitty.conf
-```
-This opens the file in the source directory. When you save and exit, `chezmoi` will verify the changes.
+Install [doti](https://github.com/volcmen/doti), then initialize:
 
-### Apply specific changes
-After editing, apply the changes to your actual home directory:
 ```bash
-chezmoi apply
+cd ~/Development/personal/configs
+doti init
 ```
 
-### Add a new file
-To start tracking a new file:
-```bash
-chezmoi add ~/.bashrc
-```
-
-### See differences
-Check what has changed between your home directory and the source state:
-```bash
-chezmoi diff
-```
-
-### Open a shell in the source directory
-```bash
-chezmoi cd
-```
-
-## Documentation
-
-For more advanced usage, check out the [chezmoi user guide](https://www.chezmoi.io/user-guide/).
+See the [doti repo](https://github.com/volcmen/doti) for full documentation.

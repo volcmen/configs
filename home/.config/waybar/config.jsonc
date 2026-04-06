@@ -1,0 +1,185 @@
+// -*- mode: jsonc -*-
+// Migrated from ashell config.toml
+{
+    "layer": "top",
+    "position": "top",
+    "spacing": 8,
+    "height": 36,
+
+    "modules-left": [
+        "hyprland/window"
+    ],
+    "modules-center": [
+        "cpu",
+        "memory",
+        "hyprland/workspaces",
+        "clock"
+    ],
+    "modules-right": [
+        "tray",
+        "privacy",
+        "hyprland/language",
+        "idle_inhibitor",
+        "pulseaudio",
+        "bluetooth",
+        "network",
+        "custom/vpn",
+        "custom/power"
+    ],
+
+    // ── Left ──────────────────────────────────────────────────────────────────
+
+    "hyprland/window": {
+        "max-length": 50,
+        "separate-outputs": true,
+        "format": "{title}"
+    },
+
+    // ── Center ────────────────────────────────────────────────────────────────
+
+    "cpu": {
+        "format": "  {usage}%",
+        "interval": 10,
+        "min-length": 8,
+        "max-length": 8,
+        "states": {
+            "warning": 60,
+            "critical": 85
+        },
+        "tooltip": true,
+        "tooltip-format": "CPU\nUsage: {usage}%\nLoad: {load}\nAvg freq: {avg_frequency} GHz\nMax freq: {max_frequency} GHz"
+    },
+
+    "memory": {
+        "format": "󰍛 {percentage}%",
+        "interval": 30,
+        "min-length": 8,
+        "max-length": 8,
+        "states": {
+            "warning": 70,
+            "critical": 90
+        },
+        "tooltip-format": "Memory\nUsed: {used:0.1f} GiB / {total:0.1f} GiB\nAvailable: {avail:0.1f} GiB\nSwap: {swapUsed:0.1f} GiB / {swapTotal:0.1f} GiB"
+    },
+
+    "hyprland/workspaces": {
+        "all-outputs": true,
+        "sort-by": "number",
+        "move-to-monitor": true,
+        "persistent-workspaces": {
+            "*": 10
+        },
+        "format": "{id} {windows}",
+        "format-window-separator": " ",
+        "window-rewrite-default": "󰣆",
+        "window-rewrite": {
+            "class<(kitty|foot|alacritty|wezterm|ghostty|gnome-terminal|org.wezfurlong.wezterm)>": "",
+            "class<(firefox|chromium|google-chrome|brave-browser|zen|librewolf|floorp|opera)>": "",
+            "class<(code|codium|cursor|zed|antigravity|jetbrains-.*|android-studio)>": "󰨞",
+            "class<(yazi|thunar|org.gnome.Nautilus|dolphin|pcmanfm|nemo)>": "",
+            "class<(org.telegram.desktop|TelegramDesktop|discord|vesktop|Slack|slack|Element|signal|Signal)>": "󰭹",
+            "class<(spotify|mpv|vlc|spotify_player|rhythmbox|celluloid)>": "󰎆",
+            "class<(steam|lutris|heroic|com.heroicgameslauncher.hgl)>": "",
+            "class<(obsidian|org.gnome.TextEditor|gedit|libreoffice.*|org.pwmt.zathura)>": "󱂬",
+            "class<(waybar|rofi|wofi|xwaylandvideobridge|polkit-gnome-authentication-agent-1)>": ""
+        },
+        "on-click": "activate",
+        "on-scroll-up": "hyprctl dispatch workspace e+1",
+        "on-scroll-down": "hyprctl dispatch workspace e-1"
+    },
+
+    "clock": {
+        // ashell format: "%a %d %b • %I:%M %p"
+        "format": "{:%a %d %b • %I:%M %p}",
+        "tooltip-format": "<big>{:%Y %B}</big>\n<tt><small>{calendar}</small></tt>"
+    },
+
+    // ── Right ─────────────────────────────────────────────────────────────────
+
+    "tray": {
+        "spacing": 8,
+        "icon-size": 16
+    },
+
+    "privacy": {
+        "icon-spacing": 6,
+        "icon-size": 14,
+        "transition-duration": 250,
+        "modules": [
+            { "type": "screenshare" },
+            { "type": "audio-in" }
+        ]
+    },
+
+    "hyprland/language": {
+        "format": "{short}",
+        "on-click": "hyprctl switchxkblayout zsa-technology-labs-moonlander-mark-i-keyboard next"
+    },
+
+    "idle_inhibitor": {
+        "format": "{icon}",
+        "format-icons": {
+            "activated": "󰅶",
+            "deactivated": "󰾪"
+        },
+        "tooltip-format-activated": "Idle inhibitor: ON",
+        "tooltip-format-deactivated": "Idle inhibitor: OFF"
+    },
+
+    "pulseaudio": {
+        "format": "{icon} {volume}%",
+        "format-muted": "󰝟 muted",
+        "format-icons": {
+            "default": ["󰕿", "󰖀", "󰕾"]
+        },
+        "scroll-step": 5,
+        "on-click": "kitty -1 wiremix --tab output",
+        "on-click-right": "kitty -1 wiremix --tab input",
+        "tooltip-format": "{desc} — {volume}%"
+    },
+
+    "bluetooth": {
+        "format": "󰂯 {status}",
+        "format-connected": "󰂱 {device_alias}",
+        "format-connected-battery": "󰂱 {device_alias} {device_battery_percentage}%",
+        "format-off": "󰂲",
+        "on-click": "kitty -1 bluetui",
+        "tooltip-format": "{controller_alias}\n{num_connections} connected"
+    },
+
+    "network": {
+        "format-wifi": "󰤨 {signalStrength}%",
+        "format-ethernet": "󰈀",
+        "format-disconnected": "󰤭 no wifi",
+        "format-linked": "󰤫 no IP",
+        "tooltip": true,
+        "tooltip-format-wifi": "{essid}\n{signalStrength}% signal\n{ipaddr}/{cidr}",
+        "tooltip-format-ethernet": "{ifname}\n{ipaddr}/{cidr}\n{bandwidthUpBytes} up · {bandwidthDownBytes} down",
+        "tooltip-format-disconnected": "No network connection",
+        "tooltip-format-linked": "{ifname} — no IP assigned",
+        "on-click": "kitty -1 impala"
+    },
+
+    // VPN indicator via NetworkManager — mirrors ashell's Vpn indicator
+    "custom/vpn": {
+        "exec": "nmcli -t -f TYPE,STATE con show --active 2>/dev/null | grep -q '^vpn:activated' && echo '󰒄 VPN' || echo ''",
+        "interval": 5,
+        "on-click": "nm-connection-editor",
+        "tooltip": false
+    },
+
+    // Power menu popup — click opens GTK menu with all power options
+    "custom/power": {
+        "format": "󰐥",
+        "tooltip": false,
+        "menu": "on-click",
+        "menu-file": "~/.config/waybar/power-menu.xml",
+        "menu-actions": {
+            "lock":     "loginctl lock-session",
+            "suspend":  "systemctl suspend",
+            "logout":   "loginctl kill-session $XDG_SESSION_ID",
+            "reboot":   "systemctl reboot",
+            "shutdown": "systemctl poweroff"
+        }
+    }
+}
