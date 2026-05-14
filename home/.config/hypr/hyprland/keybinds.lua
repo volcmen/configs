@@ -1,0 +1,6 @@
+require("hyprland/bindings/apps")
+require("hyprland/bindings/clipboard")
+require("hyprland/bindings/groups")
+require("hyprland/bindings/media")
+require("hyprland/bindings/mouse")
+require("hyprland/bindings/tiling")

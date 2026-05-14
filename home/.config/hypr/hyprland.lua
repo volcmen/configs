@@ -1,0 +1,6 @@
+require("hyprland/execs")
+require("hyprland/general")
+require("hyprland/input")
+require("hyprland/looknfeel")
+require("hyprland/rules")
+require("hyprland/keybinds")
