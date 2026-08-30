@@ -319,7 +319,7 @@ run_validator() {
 }
 
 validation_detail() {
-    local detail=$1 status=$2 had_detail=0
+    local detail=$1 status=$2 had_detail=${3:-0}
     [[ -n "$detail" ]] && had_detail=1
     detail=${detail//$'\r'/ }
     detail=${detail//$'\n'/ }
@@ -338,7 +338,7 @@ validation_detail() {
 }
 
 probe_hyprland_runtime_validation() {
-    local captured detail status
+    local capture_file detail output_present=0 status
     [[ $HYPRLAND_RUNTIME_PROBED -eq 0 ]] || return 0
     HYPRLAND_RUNTIME_PROBED=1
     if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
@@ -351,19 +351,36 @@ probe_hyprland_runtime_validation() {
         HYPRLAND_RUNTIME_DETAIL='hyprctl is unavailable'
         return
     fi
-    captured=$({ hyprctl configerrors 2>&1; printf '\037%s' "$?"; })
-    status=${captured##*$'\037'}
-    detail=${captured%$'\037'*}
-    if [[ "$captured" != *$'\037'* || ! "$status" =~ ^[0-9]+$ ]]; then
-        status=1
-        detail='hyprctl returned an unreadable result'
+    capture_file=$(mktemp "${TMPDIR:-/tmp}/dotfiles-hyprctl.XXXXXX") || {
+        HYPRLAND_RUNTIME_STATUS=1
+        HYPRLAND_RUNTIME_DETAIL='unable to create secure Hyprland validation capture'
+        return
+    }
+    trap 'rm -f -- "$capture_file"' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    hyprctl configerrors >"$capture_file" 2>&1
+    status=$?
+    if [[ -s "$capture_file" ]]; then
+        output_present=1
+        detail=$(LC_ALL=C tr -d '\000-\037\177-\237' <"$capture_file")
+    else
+        detail=''
     fi
-    if [[ $status -eq 0 && -z "$detail" ]]; then
+    if ! rm -f -- "$capture_file"; then
+        trap - EXIT HUP INT TERM
+        HYPRLAND_RUNTIME_STATUS=1
+        HYPRLAND_RUNTIME_DETAIL='unable to remove Hyprland validation capture'
+        return
+    fi
+    trap - EXIT HUP INT TERM
+    if [[ $status -eq 0 && $output_present -eq 0 ]]; then
         HYPRLAND_RUNTIME_STATUS=0
         HYPRLAND_RUNTIME_DETAIL='Hyprland runtime validation passed'
     else
         HYPRLAND_RUNTIME_STATUS=1
-        HYPRLAND_RUNTIME_DETAIL=$(validation_detail "$detail" "$status")
+        HYPRLAND_RUNTIME_DETAIL=$(validation_detail "$detail" "$status" "$output_present")
     fi
 }
 
