@@ -15,6 +15,7 @@ MANIFEST="$REPO_ROOT/dotfiles.manifest"
 
 MF_APP=(); MF_PLATFORMS=(); MF_KIND=(); MF_PATH=()
 MF_VALIDATOR=(); MF_REQUIRED=(); MF_TESTED=()
+PLAN_ACTION=(); PLAN_APP=(); PLAN_PATH=(); PLAN_SOURCE=(); PLAN_TARGET=()
 
 usage() {
     cat <<'USAGE'
@@ -196,6 +197,7 @@ safe_target() {
     local components=()
     [[ -n ${EFFECTIVE_HOME:-} && -n ${TARGET_RELATIVE_PATH:-} ]] || return 1
     current=$EFFECTIVE_HOME
+    [[ ! -L "$current" ]] || return 1
     if [[ -e "$current" || -L "$current" ]]; then
         [[ -d "$current" ]] || return 1
         TARGET_ROOT_PHYSICAL=$(physical_dir "$current") || return 1
@@ -330,15 +332,119 @@ command_diff() {
     return 0
 }
 
+build_install_plan() {
+    local host source target_path status action i
+    local conflict=0 blocked=0
+
+    detect_host >/dev/null
+    host=$HOST_PLATFORM
+    EFFECTIVE_HOME=$(effective_home)
+    [[ "$EFFECTIVE_HOME" == / ]] || EFFECTIVE_HOME=${EFFECTIVE_HOME%/}
+    [[ -n "$EFFECTIVE_HOME" ]] || die 65 'effective home is empty'
+    parse_manifest "$MANIFEST"
+    PLAN_ACTION=(); PLAN_APP=(); PLAN_PATH=(); PLAN_SOURCE=(); PLAN_TARGET=()
+
+    for ((i=0; i<${#MF_PATH[@]}; i++)); do
+        platform_selected "${MF_PLATFORMS[$i]}" "$host" || continue
+        TARGET_RELATIVE_PATH=${MF_PATH[$i]}
+        source="$SOURCE_ROOT/${MF_PATH[$i]}"
+        if [[ "$EFFECTIVE_HOME" == / ]]; then
+            target_path="/${MF_PATH[$i]}"
+        else
+            target_path="$EFFECTIVE_HOME/${MF_PATH[$i]}"
+        fi
+        status=$(artifact_status "$source" "$target_path")
+        case "$status" in
+            MISSING) action=CREATE ;;
+            LINKED) action=NOOP ;;
+            BLOCKED) action=BLOCKED; blocked=1 ;;
+            *) action=CONFLICT; conflict=1 ;;
+        esac
+        PLAN_ACTION[${#PLAN_ACTION[@]}]=$action
+        PLAN_APP[${#PLAN_APP[@]}]=${MF_APP[$i]}
+        PLAN_PATH[${#PLAN_PATH[@]}]=${MF_PATH[$i]}
+        PLAN_SOURCE[${#PLAN_SOURCE[@]}]=$source
+        PLAN_TARGET[${#PLAN_TARGET[@]}]=$target_path
+    done
+
+    for ((i=0; i<${#PLAN_ACTION[@]}; i++)); do
+        printf '%s %s %s\n' "${PLAN_ACTION[$i]}" "${PLAN_APP[$i]}" "${PLAN_PATH[$i]}"
+    done
+    if [[ $blocked -ne 0 ]]; then
+        return 65
+    elif [[ $conflict -ne 0 ]]; then
+        return 1
+    fi
+}
+
+prepare_install_parent() {
+    local relative_path=$1 current component physical i
+    local components=()
+
+    current=$EFFECTIVE_HOME
+    [[ ! -L "$current" ]] || return 1
+    if [[ -e "$current" ]]; then
+        [[ -d "$current" ]] || return 1
+    else
+        mkdir -- "$current" || return 1
+    fi
+    [[ -d "$current" && ! -L "$current" ]] || return 1
+    TARGET_ROOT_PHYSICAL=$(physical_dir "$current") || return 1
+
+    IFS=/ read -r -a components <<<"$relative_path"
+    for ((i=0; i<${#components[@]}-1; i++)); do
+        component=${components[$i]}
+        current="$current/$component"
+        [[ ! -L "$current" ]] || return 1
+        if [[ -e "$current" ]]; then
+            [[ -d "$current" ]] || return 1
+        else
+            mkdir -- "$current" || return 1
+        fi
+        [[ -d "$current" && ! -L "$current" ]] || return 1
+        physical=$(physical_dir "$current") || return 1
+        path_within "$physical" "$TARGET_ROOT_PHYSICAL" || return 1
+    done
+}
+
+apply_install_plan() {
+    local source target_path i
+
+    for ((i=0; i<${#PLAN_ACTION[@]}; i++)); do
+        [[ "${PLAN_ACTION[$i]}" == CREATE ]] || continue
+        source=${PLAN_SOURCE[$i]}
+        target_path=${PLAN_TARGET[$i]}
+        TARGET_RELATIVE_PATH=${PLAN_PATH[$i]}
+        safe_source "$source" || return 65
+        safe_target "$target_path" || return 65
+        prepare_install_parent "$TARGET_RELATIVE_PATH" || return 65
+        safe_target "$target_path" || return 65
+        [[ ! -e "$target_path" && ! -L "$target_path" ]] || return 65
+        ln -s -- "$source" "$target_path" || return 65
+    done
+}
+
 command_install() {
+    local apply=0 backup=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --apply)
+                [[ $apply -eq 0 ]] || die 64 'install accepts --apply only once'
+                apply=1
+                ;;
+            --backup)
+                [[ $apply -eq 1 && $backup -eq 0 ]] || die 64 'install --backup requires --apply'
+                backup=1
+                ;;
             --target) die 64 'install does not accept --target' ;;
             --staging-home) die 64 'install does not accept --staging-home' ;;
-            *) die 69 'install is not implemented' ;;
+            *) die 64 "unknown option: $1" ;;
         esac
+        shift
     done
-    die 69 'install is not implemented'
+    build_install_plan || return $?
+    [[ $apply -eq 1 ]] || return 0
+    apply_install_plan
 }
 
 check() {

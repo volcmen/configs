@@ -23,6 +23,7 @@ assert_not_exists() { [[ ! -e "$1" && ! -L "$1" ]] || fail "unexpected path: $1"
 new_fixture() {
     cleanup
     TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-test.XXXXXX")"
+    TEST_TMP="$(cd "$TEST_TMP" && pwd -P)"
     mkdir -p "$TEST_TMP/repo/bin" "$TEST_TMP/repo/home" "$TEST_TMP/home"
     cp "$PROJECT_ROOT/bin/dotfiles" "$TEST_TMP/repo/bin/dotfiles"
     chmod +x "$TEST_TMP/repo/bin/dotfiles"
@@ -297,6 +298,100 @@ test_install_rejects_target_and_staging_options() {
     assert_status 64 && assert_contains 'install does not accept --staging-home'
 }
 
+test_install_is_dry_run_by_default() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'x\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    run_cli install
+    assert_status 0 && assert_contains 'CREATE demo .config/demo/config' && \
+        assert_not_exists "$TEST_TMP/home/.config/demo/config"
+}
+
+test_install_apply_links_and_is_idempotent() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'x\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    run_cli install --apply
+    assert_status 0 || return 1
+    [[ "$(readlink "$TEST_TMP/home/.config/demo/config")" == "$TEST_TMP/repo/home/.config/demo/config" ]] || return 1
+    run_cli install --apply
+    assert_status 0 && assert_contains 'NOOP demo .config/demo/config'
+}
+
+test_install_conflict_aborts_complete_plan() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'new-a\n' >"$TEST_TMP/repo/home/.config/demo/a"
+    printf 'new-b\n' >"$TEST_TMP/repo/home/.config/demo/b"
+    printf 'old-a\n' >"$TEST_TMP/home/.config/demo/a"
+    write_manifest $'demo|macos|file|.config/demo/a|plain|yes|1\ndemo|macos|file|.config/demo/b|plain|yes|1'
+    run_cli install --apply
+    [[ "$CLI_STATUS" -ne 0 ]] || { fail 'conflicting install unexpectedly succeeded'; return 1; }
+    assert_contains 'CONFLICT demo .config/demo/a' || return 1
+    assert_contains 'CREATE demo .config/demo/b' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/b"
+}
+
+test_install_refuses_non_directory_parent() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config"
+    printf 'new\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'parent-is-a-file\n' >"$TEST_TMP/home/.config/demo"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    run_cli install --apply
+    [[ "$CLI_STATUS" -ne 0 ]] || { fail 'install ignored a non-directory parent'; return 1; }
+    [[ -f "$TEST_TMP/home/.config/demo" ]] || return 1
+}
+
+test_install_selects_only_physical_platform() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'mac\n' >"$TEST_TMP/repo/home/.config/demo/mac"
+    printf 'arch\n' >"$TEST_TMP/repo/home/.config/demo/arch"
+    write_manifest $'demo|macos|file|.config/demo/mac|plain|yes|1\ndemo|arch|file|.config/demo/arch|plain|yes|1'
+    run_cli install --apply
+    assert_status 0 || return 1
+    [[ -L "$TEST_TMP/home/.config/demo/mac" ]] || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/arch"
+}
+
+test_install_rejects_backup_without_apply_and_unknown_options() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'x\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    run_cli install --backup
+    assert_status 64 || return 1
+    run_cli install --apply --unknown
+    assert_status 64 || return 1
+    run_cli install --apply --backup
+    assert_status 0 && [[ -L "$TEST_TMP/home/.config/demo/config" ]]
+}
+
+test_install_backup_does_not_replace_conflicts() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || { fail 'backup install unexpectedly replaced a conflict'; return 1; }
+    [[ "$(<"$TEST_TMP/home/.config/demo/config")" == existing ]]
+}
+
+test_install_blocks_symlinked_parent() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/outside"
+    printf 'x\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    ln -s "$TEST_TMP/outside" "$TEST_TMP/home/.config"
+    run_cli install --apply
+    assert_status 65 && assert_contains 'BLOCKED demo .config/demo/config' && \
+        assert_not_exists "$TEST_TMP/outside/demo/config"
+}
+
 test_dotfiles_copy_dispatches_portably() {
     local helper="$PROJECT_ROOT/home/.local/bin/dotfiles-copy"
     local stub_path empty_path output status
@@ -353,6 +448,14 @@ run_test test_diff_fails_closed_without_canonical_source_root
 run_test test_diff_blocks_unsafe_source_paths
 run_test test_diff_blocks_unsafe_target_ancestors
 run_test test_install_rejects_target_and_staging_options
+run_test test_install_is_dry_run_by_default
+run_test test_install_apply_links_and_is_idempotent
+run_test test_install_conflict_aborts_complete_plan
+run_test test_install_refuses_non_directory_parent
+run_test test_install_selects_only_physical_platform
+run_test test_install_rejects_backup_without_apply_and_unknown_options
+run_test test_install_backup_does_not_replace_conflicts
+run_test test_install_blocks_symlinked_parent
 run_test test_dotfiles_copy_dispatches_portably
 printf '%s passed; %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 [[ "$FAIL_COUNT" -eq 0 ]]
