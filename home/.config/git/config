@@ -3,32 +3,53 @@
 	email = volcmen@gmail.com
 
 [init]
-  defaultBranch = main
+	defaultBranch = main
 
 [core]
-  editor = nvim
-  autocrlf = input
-  pager = delta
+	editor = nvim
+	autocrlf = input
+	pager = delta
+	untrackedCache = true
+	fsmonitor = false
 
 [pull]
 	rebase = true
 
 [push]
-	autoSetupRemote = true   # Automatically set upstream branch on push
-  default = simple
+	autoSetupRemote = true
+	default = simple
 
 [merge]
-  conflictStyle = zdiff3
+	conflictStyle = zdiff3
 
 [help]
-  autocorrect = prompt
+	autocorrect = prompt
 
 [interactive]
-    diffFilter = delta --color-ony
+	diffFilter = delta --color-only
 
 [delta]
-    hyperlinks = true
-    side-by-side = true
-    navigate = true  # use n and N to move between diff sections
-    dark = true      # or light = true, or omit for auto-detection
-    line-numbers = true
+	hyperlinks = true
+	side-by-side = true
+	navigate = true
+	dark = true
+	line-numbers = true
+
+[url "git@gitlab.com:"]
+	insteadOf = https://gitlab.com/
+
+[url "git@github.com:"]
+	insteadOf = https://github.com/
+
+[branch]
+	autoSetupRebase = always
+	sort = -committerdate
+
+[rebase]
+	autoStash = true
+
+[rerere]
+	enabled = true
+
+[fetch]
+	prune = true

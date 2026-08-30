@@ -1,66 +1,111 @@
-"$schema" = 'https://starship.rs/config-schema.json'
+"$schema" = "https://starship.rs/config-schema.json"
+
+# External commands should normally finish far below this budget. Keeping a
+# little headroom avoids noisy warnings during an occasional cold start.
+command_timeout = 2000
+palette = "tokyo_night"
 
 format = """
-[░▒▓](#a3aed2)\
-[  ](bg:#a3aed2 fg:#090c0c)\
-[](bg:#769ff0 fg:#a3aed2)\
+[░▒▓](os_bg)\
+$os\
+[](fg:os_bg bg:directory_bg)\
 $directory\
-[](fg:#769ff0 bg:#394260)\
+[](fg:directory_bg bg:git_bg)\
 $git_branch\
 $git_status\
-[](fg:#394260 bg:#212736)\
+$git_state\
+[](fg:git_bg bg:runtime_bg)\
 $nodejs\
+$python\
 $rust\
 $golang\
 $php\
-[](fg:#212736 bg:#1d2230)\
+[](fg:runtime_bg bg:time_bg)\
+$cmd_duration\
 $time\
-[ ](fg:#1d2230)\
+[ ](fg:time_bg)\
 \n$character"""
 
+[palettes.tokyo_night]
+os_bg = "#a3aed2"
+os_fg = "#090c0c"
+directory_bg = "#769ff0"
+text = "#e3e5e5"
+git_bg = "#394260"
+runtime_bg = "#212736"
+time_bg = "#1d2230"
+accent = "#769ff0"
+muted = "#a0a9cb"
+
+[os]
+disabled = false
+style = "fg:os_fg bg:os_bg"
+format = "[ $symbol ]($style)"
+
+[os.symbols]
+Arch = ""
+Linux = ""
+Macos = ""
+Ubuntu = ""
+Windows = ""
+
 [directory]
-style = "fg:#e3e5e5 bg:#769ff0"
+style = "fg:text bg:directory_bg"
 format = "[ $path ]($style)"
 truncation_length = 3
 truncation_symbol = "…/"
 
 [directory.substitutions]
-"Documents" = "󰈙 "
-"Downloads" = " "
-"Music" = " "
-"Pictures" = " "
+Documents = "󰈙 "
+Downloads = " "
+Music = " "
+Pictures = " "
 
 [git_branch]
 symbol = ""
-style = "bg:#394260"
-format = '[[ $symbol $branch ](fg:#769ff0 bg:#394260)]($style)'
+style = "fg:accent bg:git_bg"
+format = "[ $symbol $branch ]($style)"
 
 [git_status]
-style = "bg:#394260"
-format = '[[($all_status$ahead_behind )](fg:#769ff0 bg:#394260)]($style)'
+style = "fg:accent bg:git_bg"
+format = "[$all_status$ahead_behind ]($style)"
+
+[git_state]
+style = "fg:accent bg:git_bg"
+format = "[$state( $progress_current/$progress_total) ]($style)"
 
 [nodejs]
 symbol = ""
-style = "bg:#212736"
-format = '[[ $symbol ($version) ](fg:#769ff0 bg:#212736)]($style)'
+style = "fg:accent bg:runtime_bg"
+format = "[ $symbol ($version) ]($style)"
+
+[python]
+symbol = ""
+style = "fg:accent bg:runtime_bg"
+format = '[ $symbol ($version)(\($virtualenv\)) ]($style)'
 
 [rust]
 symbol = ""
-style = "bg:#212736"
-format = '[[ $symbol ($version) ](fg:#769ff0 bg:#212736)]($style)'
+style = "fg:accent bg:runtime_bg"
+format = "[ $symbol ($version) ]($style)"
 
 [golang]
 symbol = ""
-style = "bg:#212736"
-format = '[[ $symbol ($version) ](fg:#769ff0 bg:#212736)]($style)'
+style = "fg:accent bg:runtime_bg"
+format = "[ $symbol ($version) ]($style)"
 
 [php]
 symbol = ""
-style = "bg:#212736"
-format = '[[ $symbol ($version) ](fg:#769ff0 bg:#212736)]($style)'
+style = "fg:accent bg:runtime_bg"
+format = "[ $symbol ($version) ]($style)"
+
+[cmd_duration]
+min_time = 2000
+style = "fg:muted bg:time_bg"
+format = "[  $duration ]($style)"
 
 [time]
 disabled = false
-time_format = "%R" # Hour:Minute Format
-style = "bg:#1d2230"
-format = '[[  $time ](fg:#a0a9cb bg:#1d2230)]($style)'
+time_format = "%R"
+style = "fg:muted bg:time_bg"
+format = "[  $time ]($style)"
