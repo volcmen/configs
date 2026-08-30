@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-30
 
-**Status:** Approved in chat; written-spec review pending
+**Status:** Approved
 
 **Targets:** macOS and Arch Linux with Hyprland
 
