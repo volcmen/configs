@@ -604,24 +604,79 @@ STUB
 }
 
 test_install_signal_after_link_temp_cleans_intent() {
-    local hook
+    local hook identity
     new_fixture
     mkdir -p "$TEST_TMP/repo/home/.config/demo"
     printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
     write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
     hook="$TEST_TMP/signal-after-link-temp"
-    cat >"$hook" <<'STUB'
+    cat >"$hook" <<STUB
 #!/bin/sh
-if [ "$1" = after_link_temp ]; then
-    kill -TERM "$PPID"
+if [ "\$1" = after_link_temp ]; then
+    printf '%s\n' "\$4" >"$TEST_TMP/signal-link-identity"
+    kill -TERM "\$PPID"
 fi
 STUB
     chmod +x "$hook"
 
     DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
     assert_status 143 || return 1
+    identity="$(<"$TEST_TMP/signal-link-identity")"
+    [[ "$identity" == *:* ]] || return 1
     assert_not_exists "$TEST_TMP/home/.config/demo/config" || return 1
     [[ -z "$(find "$TEST_TMP/home" -name '.dotfiles-link-*' -print)" ]] || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock"
+}
+
+test_install_identity_capture_failure_refuses_identityless_temp() {
+    local stub_path temp
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/stub-bin"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    stub_path="$TEST_TMP/stub-bin/stat"
+    cat >"$stub_path" <<'STUB'
+#!/bin/sh
+for argument in "$@"; do
+    case "$argument" in
+        *.dotfiles-link-*) exit 1 ;;
+    esac
+done
+exec /usr/bin/stat "$@"
+STUB
+    chmod +x "$stub_path"
+
+    DOTFILES_TEST_PATH="$TEST_TMP/stub-bin:$PATH" run_cli install --apply
+    assert_status 65 && assert_contains 'ROLLBACK_REFUSED .config/demo/config' || return 1
+    temp="$(find "$TEST_TMP/home" -name '.dotfiles-link-*' -type l -print)"
+    [[ -n "$temp" && "$(readlink "$temp")" == "$TEST_TMP/repo/home/.config/demo/config" ]] || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock"
+}
+
+test_install_failure_after_link_identity_uses_recorded_owner() {
+    local hook identity quarantine
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/fail-after-link-identity"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = after_link_temp ]; then
+    printf '%s\n' "\$4" >"$TEST_TMP/recorded-link-identity"
+    exit 71
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
+    assert_status 71 || return 1
+    identity="$(<"$TEST_TMP/recorded-link-identity")"
+    [[ "$identity" == *:* ]] || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/config" || return 1
+    [[ -z "$(find "$TEST_TMP/home" -name '.dotfiles-link-*' -print)" ]] || return 1
+    quarantine="$(find "$TEST_TMP/state/transactions" -path '*/quarantine/link-*/temp' -type l -print)"
+    [[ -n "$quarantine" && "$(readlink "$quarantine")" == "$TEST_TMP/repo/home/.config/demo/config" ]] || return 1
     assert_not_exists "$TEST_TMP/state/install.lock"
 }
 
@@ -768,6 +823,56 @@ STUB
     assert_not_exists "$TEST_TMP/state/install.lock"
 }
 
+test_install_backup_stage_directory_arrival_is_recovered() {
+    local hook stage
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/backup-stage-directory-arrival"
+    cat >"$hook" <<'STUB'
+#!/bin/sh
+if [ "$1" = before_backup_stage ]; then
+    mkdir "$3"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    assert_status 74 || return 1
+    [[ ! -L "$TEST_TMP/home/.config/demo/config" && "$(<"$TEST_TMP/home/.config/demo/config")" == existing ]] || return 1
+    stage="$(find "$TEST_TMP/home/.config/demo" -maxdepth 1 -name '.dotfiles-backup-*' -type d -print)"
+    [[ -n "$stage" && -z "$(find "$stage" ! -path "$stage" -print)" ]] || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock"
+}
+
+test_install_backup_stage_recovery_directory_tracks_nested_entry() {
+    local hook stage recovery
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/backup-stage-recovery-directory-arrival"
+    cat >"$hook" <<'STUB'
+#!/bin/sh
+if [ "$1" = before_backup_stage ]; then
+    mkdir "$3" "$4"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    assert_status 74 || return 1
+    [[ ! -L "$TEST_TMP/home/.config/demo/config" && "$(<"$TEST_TMP/home/.config/demo/config")" == existing ]] || return 1
+    stage="$(find "$TEST_TMP/home/.config/demo" -maxdepth 1 -name '.dotfiles-backup-*' ! -name '*recovery*' -type d -print)"
+    recovery="$(find "$TEST_TMP/home/.config/demo" -maxdepth 1 -name '.dotfiles-backup-recovery-*' -type d -print)"
+    [[ -n "$stage" && -z "$(find "$stage" ! -path "$stage" -print)" ]] || return 1
+    [[ -n "$recovery" && -z "$(find "$recovery" ! -path "$recovery" -print)" ]] || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock"
+}
+
 test_install_restore_directory_arrival_preserves_backup() {
     local hook backup target
     new_fixture
@@ -840,6 +945,60 @@ STUB
     [[ -d "$target" && -z "$(find "$target" ! -path "$target" -print)" ]] || return 1
     backup="$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config' -type f -print)"
     [[ -n "$backup" && "$(<"$backup")" == existing ]] || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock"
+}
+
+test_install_link_recovery_directory_arrival_tracks_nested_publication() {
+    local hook target recovery backup
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/link-recovery-directory-arrival"
+    cat >"$hook" <<'STUB'
+#!/bin/sh
+if [ "$1" = link_publish_after_check ]; then
+    mkdir "$2" "$4"
+    printf 'unrelated\n' >"$4/unrelated"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    assert_status 74 || return 1
+    target="$TEST_TMP/home/.config/demo/config"
+    recovery="$(find "$TEST_TMP/home/.config/demo" -maxdepth 1 -name '.dotfiles-link-recovery-*' -type d -print)"
+    [[ -d "$target" && -z "$(find "$target" ! -path "$target" -print)" ]] || return 1
+    [[ -n "$recovery" && "$(<"$recovery/unrelated")" == unrelated ]] || return 1
+    [[ -z "$(find "$TEST_TMP/home" -type l -print)" ]] || return 1
+    backup="$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config' -type f -print)"
+    [[ -n "$backup" && "$(<"$backup")" == existing ]] || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock"
+}
+
+test_install_success_cleanup_swap_preserves_unrelated_content() {
+    local hook unrelated
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/swap-success-cleanup-directory"
+    cat >"$hook" <<'STUB'
+#!/bin/sh
+if [ "$1" = success_cleanup_before_transaction_rmdir ]; then
+    mv "$2" "$2.owned"
+    mkdir "$2"
+    printf 'unrelated\n' >"$2/unrelated"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
+    assert_status 74 || return 1
+    [[ -L "$TEST_TMP/home/.config/demo/config" ]] || return 1
+    unrelated="$(find "$TEST_TMP/state/transactions" -name unrelated -type f -print)"
+    [[ -n "$unrelated" && "$(<"$unrelated")" == unrelated ]] || return 1
     assert_not_exists "$TEST_TMP/state/install.lock"
 }
 
@@ -1012,15 +1171,21 @@ run_test test_install_backup_destination_gap_never_clobbers
 run_test test_install_rollback_restore_gap_never_overwrites
 run_test test_install_signal_after_backup_move_rolls_back_intent
 run_test test_install_signal_after_link_temp_cleans_intent
+run_test test_install_failure_after_link_identity_uses_recorded_owner
+run_test test_install_identity_capture_failure_refuses_identityless_temp
 run_test test_install_signal_after_link_publish_rolls_back_intent
 run_test test_install_signal_at_lock_acquisition_releases_lock
 run_test test_install_signal_during_cleanup_preserves_failure_status
 run_test test_install_state_root_swap_never_redirects_transaction
 run_test test_install_rollback_restores_same_target_different_identity
 run_test test_install_backup_directory_arrival_recovers_source
+run_test test_install_backup_stage_directory_arrival_is_recovered
+run_test test_install_backup_stage_recovery_directory_tracks_nested_entry
 run_test test_install_restore_directory_arrival_preserves_backup
 run_test test_install_state_swap_after_check_keeps_pinned_backup
 run_test test_install_link_publication_directory_arrival_is_recovered
+run_test test_install_link_recovery_directory_arrival_tracks_nested_publication
+run_test test_install_success_cleanup_swap_preserves_unrelated_content
 run_test test_install_success_transactions_are_pruned
 run_test test_install_blocks_symlinked_parent
 run_test test_install_rechecks_source_after_parent_preparation
