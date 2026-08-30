@@ -873,6 +873,65 @@ STUB
     assert_not_exists "$TEST_TMP/state/install.lock"
 }
 
+test_install_backup_stage_symlink_directories_never_escape_target_tree() {
+    local hook target
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo" \
+        "$TEST_TMP/external-stage" "$TEST_TMP/external-recovery"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    printf 'stage-sentinel\n' >"$TEST_TMP/external-stage/sentinel"
+    printf 'recovery-sentinel\n' >"$TEST_TMP/external-recovery/sentinel"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/backup-stage-symlink-arrivals"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = before_backup_stage ]; then
+    /bin/ln -s "$TEST_TMP/external-stage" "\$3"
+    /bin/ln -s "$TEST_TMP/external-recovery" "\$4"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    assert_status 74 || return 1
+    target="$TEST_TMP/home/.config/demo/config"
+    [[ -f "$target" && ! -L "$target" && "$(<"$target")" == existing ]] || return 1
+    [[ "$(<"$TEST_TMP/external-stage/sentinel")" == stage-sentinel ]] || return 1
+    [[ "$(<"$TEST_TMP/external-recovery/sentinel")" == recovery-sentinel ]] || return 1
+    [[ -z "$(find "$TEST_TMP/external-stage" -mindepth 1 ! -name sentinel -print)" ]] || return 1
+    [[ -z "$(find "$TEST_TMP/external-recovery" -mindepth 1 ! -name sentinel -print)" ]] || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock"
+}
+
+test_install_backup_recovery_symlink_directory_never_escapes_target_tree() {
+    local hook target
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo" \
+        "$TEST_TMP/external-recovery"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    printf 'recovery-sentinel\n' >"$TEST_TMP/external-recovery/sentinel"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/backup-recovery-symlink-arrival"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = before_backup_stage ]; then
+    /bin/mkdir "\$3"
+    /bin/ln -s "$TEST_TMP/external-recovery" "\$4"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    assert_status 74 || return 1
+    target="$TEST_TMP/home/.config/demo/config"
+    [[ -f "$target" && ! -L "$target" && "$(<"$target")" == existing ]] || return 1
+    [[ "$(<"$TEST_TMP/external-recovery/sentinel")" == recovery-sentinel ]] || return 1
+    [[ -z "$(find "$TEST_TMP/external-recovery" -mindepth 1 ! -name sentinel -print)" ]] || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock"
+}
+
 test_install_restore_directory_arrival_preserves_backup() {
     local hook backup target
     new_fixture
@@ -972,6 +1031,35 @@ STUB
     [[ -d "$target" && -z "$(find "$target" ! -path "$target" -print)" ]] || return 1
     [[ -n "$recovery" && "$(<"$recovery/unrelated")" == unrelated ]] || return 1
     [[ -z "$(find "$TEST_TMP/home" -type l -print)" ]] || return 1
+    backup="$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config' -type f -print)"
+    [[ -n "$backup" && "$(<"$backup")" == existing ]] || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock"
+}
+
+test_install_link_publication_symlink_directory_never_escapes_target_tree() {
+    local hook target backup
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo" \
+        "$TEST_TMP/external-publication"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    printf 'publication-sentinel\n' >"$TEST_TMP/external-publication/sentinel"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/link-publication-symlink-arrival"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = link_publish_after_check ]; then
+    /bin/ln -s "$TEST_TMP/external-publication" "\$2"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    assert_status 74 || return 1
+    target="$TEST_TMP/home/.config/demo/config"
+    [[ -L "$target" && "$(readlink "$target")" == "$TEST_TMP/external-publication" ]] || return 1
+    [[ "$(<"$TEST_TMP/external-publication/sentinel")" == publication-sentinel ]] || return 1
+    [[ -z "$(find "$TEST_TMP/external-publication" -mindepth 1 ! -name sentinel -print)" ]] || return 1
     backup="$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config' -type f -print)"
     [[ -n "$backup" && "$(<"$backup")" == existing ]] || return 1
     assert_not_exists "$TEST_TMP/state/install.lock"
@@ -1181,10 +1269,13 @@ run_test test_install_rollback_restores_same_target_different_identity
 run_test test_install_backup_directory_arrival_recovers_source
 run_test test_install_backup_stage_directory_arrival_is_recovered
 run_test test_install_backup_stage_recovery_directory_tracks_nested_entry
+run_test test_install_backup_stage_symlink_directories_never_escape_target_tree
+run_test test_install_backup_recovery_symlink_directory_never_escapes_target_tree
 run_test test_install_restore_directory_arrival_preserves_backup
 run_test test_install_state_swap_after_check_keeps_pinned_backup
 run_test test_install_link_publication_directory_arrival_is_recovered
 run_test test_install_link_recovery_directory_arrival_tracks_nested_publication
+run_test test_install_link_publication_symlink_directory_never_escapes_target_tree
 run_test test_install_success_cleanup_swap_preserves_unrelated_content
 run_test test_install_success_transactions_are_pruned
 run_test test_install_blocks_symlinked_parent

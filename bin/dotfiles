@@ -25,6 +25,7 @@ JOURNAL_TYPE=(); JOURNAL_RELATIVE=(); JOURNAL_FIRST=(); JOURNAL_SECOND=(); JOURN
 JOURNAL_AUX=(); JOURNAL_AUX_RELATIVE=(); JOURNAL_EXTRA=(); JOURNAL_EXTRA_RELATIVE=()
 JOURNAL_COUNT=0; MUTATION_COUNT=0; TEST_FAIL_AFTER=''
 TRANSACTION_ACTIVE=0; CLEANUP_ACTIVE=0; PENDING_SIGNAL=0
+TRANSACTION_MOVE_STYLE=''
 
 usage() {
     cat <<'USAGE'
@@ -456,6 +457,25 @@ path_fingerprint() {
     fi
 }
 
+select_transaction_move_style() {
+    local kernel
+    kernel=$(/usr/bin/uname -s 2>/dev/null) || return 74
+    case "$kernel" in
+        Darwin) TRANSACTION_MOVE_STYLE=bsd ;;
+        Linux) TRANSACTION_MOVE_STYLE=gnu ;;
+        *) return 74 ;;
+    esac
+}
+
+move_no_clobber_exact() {
+    [[ $# -eq 2 ]] || return 74
+    case "$TRANSACTION_MOVE_STYLE" in
+        bsd) command mv -h -n -- "$1" "$2" ;;
+        gnu) command mv -n -T -- "$1" "$2" ;;
+        *) return 74 ;;
+    esac
+}
+
 pin_state_root() {
     STATE_ROOT=$(state_root) || return $?
     mkdir -p -- "$STATE_ROOT" || return 74
@@ -730,16 +750,16 @@ stage_backup_target() (
     [[ "$(path_fingerprint "$target_name")" == "$expected_fingerprint" ]] || return 65
     install_test_hook before_backup_stage "$target_path" "$stage_path" "$recovery_path" || return $?
     [[ "$(path_fingerprint "$target_name")" == "$expected_fingerprint" ]] || return 65
-    mv -n -- "$target_name" "$stage_name" || return 74
+    move_no_clobber_exact "$target_name" "$stage_name" || return 74
     [[ ! -e "$target_name" && ! -L "$target_name" ]] || return 74
     actual=''
     stage_status=0
     if [[ "$(path_fingerprint "$stage_name" 2>/dev/null || true)" == "$expected_fingerprint" ]]; then
         actual="${target_path%/*}/$stage_name"
-    elif [[ -d "$stage_name" ]]; then
+    elif [[ -d "$stage_name" && ! -L "$stage_name" ]]; then
         nested="$stage_name/$target_name"
         if [[ "$(path_fingerprint "$nested" 2>/dev/null || true)" == "$expected_fingerprint" ]]; then
-            mv -n -- "$nested" "$recovery_name" || true
+            move_no_clobber_exact "$nested" "$recovery_name" || true
             recovery_nested="$recovery_name/$target_name"
             if [[ "$(path_fingerprint "$nested" 2>/dev/null || true)" == "$expected_fingerprint" ]]; then
                 actual="${target_path%/*}/$nested"
@@ -771,12 +791,12 @@ move_staged_backup() {
     install_test_hook backup_move_after_state_check "$STATE_ROOT" "$backup_display" || return $?
     honor_pending_signal || return $?
     refresh_state_physical_from_cwd || return $?
-    mv -n -- "$stage_path" "$backup_path" || return 74
+    move_no_clobber_exact "$stage_path" "$backup_path" || return 74
     honor_pending_signal || return $?
-    if [[ -d "$backup_path" ]]; then
+    if [[ -d "$backup_path" && ! -L "$backup_path" ]]; then
         container_path="$backup_path/$stage_name"
         if [[ -e "$container_path" || -L "$container_path" ]]; then
-            mv -n -- "$container_path" "$stage_path" || return 74
+            move_no_clobber_exact "$container_path" "$stage_path" || return 74
             [[ -e "$stage_path" || -L "$stage_path" ]] || return 74
         fi
         return 74
@@ -819,10 +839,10 @@ publish_link_temp() (
     safe_source "$source" || return 65
     install_test_hook link_publish_after_check "$target_path" "$temp_path" "$recovery_hint" || return $?
     honor_pending_signal || return $?
-    mv -n -- "$temp_name" "$target_name" || return 74
+    move_no_clobber_exact "$temp_name" "$target_name" || return 74
     actual=''
     status=0
-    if [[ -d "$target_name" ]]; then
+    if [[ -d "$target_name" && ! -L "$target_name" ]]; then
         container_path="$target_name/$temp_name"
         if [[ -L "$container_path" && "$(path_identity "$container_path")" == "$expected_identity" ]]; then
             actual="${target_path%/*}/$container_path"
@@ -905,11 +925,11 @@ pin_rollback_target_parent() {
 
 restore_local_stage_exact() {
     local stage_name=$1 destination_name=$2 container_path
-    mv -n -- "$stage_name" "$destination_name" || return 2
-    if [[ -d "$destination_name" ]]; then
+    move_no_clobber_exact "$stage_name" "$destination_name" || return 2
+    if [[ -d "$destination_name" && ! -L "$destination_name" ]]; then
         container_path="$destination_name/$stage_name"
         if [[ -e "$container_path" || -L "$container_path" ]]; then
-            mv -n -- "$container_path" "$stage_name" || return 2
+            move_no_clobber_exact "$container_path" "$stage_name" || return 2
         fi
         return 2
     fi
@@ -931,7 +951,7 @@ stage_rollback_link_path() (
     fi
     [[ "$(pwd -P)" == "$parent_before" ]] || return 2
     [[ -e "$name" || -L "$name" ]] || return 0
-    mv -n -- "$name" "$stage_name" || return 2
+    move_no_clobber_exact "$name" "$stage_name" || return 2
     [[ ! -e "$name" && ! -L "$name" ]] || return 2
     [[ -e "$stage_name" || -L "$stage_name" ]] || return 2
     observed_identity=$(path_identity "$stage_name") || observed_identity=''
@@ -950,11 +970,11 @@ move_local_stage_to_quarantine() {
     [[ -e "$stage_path" || -L "$stage_path" ]] || return 0
     stage_name=${stage_path##*/}
     state_cwd_matches_pin || return 2
-    mv -n -- "$stage_path" "$quarantine_path" || return 2
-    if [[ -d "$quarantine_path" ]]; then
+    move_no_clobber_exact "$stage_path" "$quarantine_path" || return 2
+    if [[ -d "$quarantine_path" && ! -L "$quarantine_path" ]]; then
         container_path="$quarantine_path/$stage_name"
         if [[ -e "$container_path" || -L "$container_path" ]]; then
-            mv -n -- "$container_path" "$stage_path" || return 2
+            move_no_clobber_exact "$container_path" "$stage_path" || return 2
         fi
         return 2
     fi
@@ -1004,11 +1024,11 @@ publish_restore_stage() (
     stage_name=${stage_path##*/}
     [[ "$(path_fingerprint "$stage_name")" == "$expected_fingerprint" ]] || return 2
     install_test_hook rollback_move_before_restore "$target_path" "$backup_display" || return 2
-    mv -n -- "$stage_name" "$target_name" || return 2
-    if [[ -d "$target_name" ]]; then
+    move_no_clobber_exact "$stage_name" "$target_name" || return 2
+    if [[ -d "$target_name" && ! -L "$target_name" ]]; then
         container_path="$target_name/$stage_name"
         if [[ -e "$container_path" || -L "$container_path" ]]; then
-            mv -n -- "$container_path" "$stage_name" || return 2
+            move_no_clobber_exact "$container_path" "$stage_name" || return 2
         fi
         return 2
     fi
@@ -1023,11 +1043,11 @@ return_restore_stage_to_backup() {
     [[ -e "$stage_path" || -L "$stage_path" ]] || return 2
     stage_name=${stage_path##*/}
     state_cwd_matches_pin || return 2
-    mv -n -- "$stage_path" "$backup_path" || return 2
-    if [[ -d "$backup_path" ]]; then
+    move_no_clobber_exact "$stage_path" "$backup_path" || return 2
+    if [[ -d "$backup_path" && ! -L "$backup_path" ]]; then
         container_path="$backup_path/$stage_name"
         if [[ -e "$container_path" || -L "$container_path" ]]; then
-            mv -n -- "$container_path" "$stage_path" || return 2
+            move_no_clobber_exact "$container_path" "$stage_path" || return 2
         fi
         return 2
     fi
@@ -1041,11 +1061,11 @@ move_local_backup_to_restore_stage() (
     source_name=${source_path##*/}
     [[ "$(path_fingerprint "$source_name")" == "$expected_fingerprint" ]] || return 2
     [[ ! -e "$restore_stage" && ! -L "$restore_stage" ]] || return 2
-    mv -n -- "$source_name" "$restore_stage" || return 2
-    if [[ -d "$restore_stage" ]]; then
+    move_no_clobber_exact "$source_name" "$restore_stage" || return 2
+    if [[ -d "$restore_stage" && ! -L "$restore_stage" ]]; then
         container_path="$restore_stage/$source_name"
         if [[ -e "$container_path" || -L "$container_path" ]]; then
-            mv -n -- "$container_path" "$source_name" || return 2
+            move_no_clobber_exact "$container_path" "$source_name" || return 2
         fi
         return 2
     fi
@@ -1062,11 +1082,11 @@ rollback_move_entry() {
         [[ ! -e "$restore_stage" && ! -L "$restore_stage" ]] || return 2
         install_test_hook rollback_move_before_stage "$target_path" "$backup_display" || return 2
         backup_name=${backup_path##*/}
-        mv -n -- "$backup_path" "$restore_stage" || return 2
-        if [[ -d "$restore_stage" ]]; then
+        move_no_clobber_exact "$backup_path" "$restore_stage" || return 2
+        if [[ -d "$restore_stage" && ! -L "$restore_stage" ]]; then
             container_path="$restore_stage/$backup_name"
             if [[ -e "$container_path" || -L "$container_path" ]]; then
-                mv -n -- "$container_path" "$backup_path" || return 2
+                move_no_clobber_exact "$container_path" "$backup_path" || return 2
             fi
             return 2
         fi
@@ -1151,6 +1171,7 @@ transaction_trap() {
 }
 
 start_transaction() {
+    select_transaction_move_style || return $?
     reset_transaction_journal || return $?
     TRANSACTION_START_DIR=$(pwd -P) || return 65
     TRANSACTION_ACTIVE=1
