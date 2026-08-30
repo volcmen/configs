@@ -20,8 +20,8 @@ PLAN_NEEDS_BACKUP=0
 
 STATE_ROOT=''; STATE_ROOT_PHYSICAL=''; STATE_ROOT_IDENTITY=''; TRANSACTION_START_DIR=''
 LOCK_PATH='install.lock'; LOCK_HELD=0
-TRANSACTION_ROOT=''; QUARANTINE_ROOT=''; BACKUP_ROOT=''; BACKUP_FILES=''; REPORT_PATH=''
-JOURNAL_TYPE=(); JOURNAL_RELATIVE=(); JOURNAL_FIRST=(); JOURNAL_SECOND=(); JOURNAL_IDENTITY=(); JOURNAL_AUX=()
+TRANSACTION_ROOT=''; TRANSACTION_ROOT_IDENTITY=''; QUARANTINE_ROOT=''; BACKUP_ROOT=''; BACKUP_FILES=''; REPORT_PATH=''
+JOURNAL_TYPE=(); JOURNAL_RELATIVE=(); JOURNAL_FIRST=(); JOURNAL_SECOND=(); JOURNAL_IDENTITY=(); JOURNAL_AUX=(); JOURNAL_EXTRA=()
 JOURNAL_COUNT=0; MUTATION_COUNT=0; TEST_FAIL_AFTER=''
 TRANSACTION_ACTIVE=0; CLEANUP_ACTIVE=0; PENDING_SIGNAL=0
 
@@ -420,7 +420,7 @@ state_root() {
 }
 
 reset_transaction_journal() {
-    JOURNAL_TYPE=(); JOURNAL_RELATIVE=(); JOURNAL_FIRST=(); JOURNAL_SECOND=(); JOURNAL_IDENTITY=(); JOURNAL_AUX=()
+    JOURNAL_TYPE=(); JOURNAL_RELATIVE=(); JOURNAL_FIRST=(); JOURNAL_SECOND=(); JOURNAL_IDENTITY=(); JOURNAL_AUX=(); JOURNAL_EXTRA=()
     JOURNAL_COUNT=0
     MUTATION_COUNT=0
     PENDING_SIGNAL=0
@@ -435,8 +435,8 @@ reset_transaction_journal() {
 }
 
 path_identity() {
-    local identity ignored
-    IFS=' ' read -r identity ignored <<<"$(LC_ALL=C ls -di -- "$1")" || return 1
+    local identity
+    identity=$(stat -f '%d:%i' "$1" 2>/dev/null) || identity=$(stat -c '%d:%i' "$1" 2>/dev/null) || return 1
     [[ -n "$identity" ]] || return 1
     printf '%s\n' "$identity"
 }
@@ -473,6 +473,18 @@ state_name_matches_pin() {
 state_cwd_matches_pin() {
     local identity
     identity=$(path_identity .) || return 1
+    [[ "$identity" == "$STATE_ROOT_IDENTITY" ]]
+}
+
+refresh_state_physical_from_cwd() {
+    state_cwd_matches_pin || return 74
+    STATE_ROOT_PHYSICAL=$(pwd -P) || return 74
+}
+
+state_physical_matches_pin() {
+    local identity
+    [[ -d "$STATE_ROOT_PHYSICAL" && ! -L "$STATE_ROOT_PHYSICAL" ]] || return 1
+    identity=$(path_identity "$STATE_ROOT_PHYSICAL") || return 1
     [[ "$identity" == "$STATE_ROOT_IDENTITY" ]]
 }
 
@@ -520,6 +532,8 @@ begin_transaction_storage() {
     mkdir -p -- transactions || return 74
     TRANSACTION_ROOT="transactions/$timestamp-$$"
     mkdir -- "$TRANSACTION_ROOT" || return 74
+    chmod 700 "$TRANSACTION_ROOT" || return 74
+    TRANSACTION_ROOT_IDENTITY=$(path_identity "$TRANSACTION_ROOT") || return 74
     QUARANTINE_ROOT="$TRANSACTION_ROOT/quarantine"
     mkdir -- "$QUARANTINE_ROOT" || return 74
     honor_pending_signal || return $?
@@ -546,25 +560,27 @@ append_report() {
 }
 
 journal_move() {
-    local relative_path=$1 target_path=$2 backup_path=$3 fingerprint=$4 i=$JOURNAL_COUNT
+    local relative_path=$1 target_path=$2 backup_path=$3 fingerprint=$4 stage_path=$5 i=$JOURNAL_COUNT
     JOURNAL_TYPE[$i]=MOVE
     JOURNAL_RELATIVE[$i]=$relative_path
     JOURNAL_FIRST[$i]=$target_path
     JOURNAL_SECOND[$i]=$backup_path
     JOURNAL_IDENTITY[$i]=$fingerprint
-    JOURNAL_AUX[$i]=''
+    JOURNAL_AUX[$i]=$stage_path
+    JOURNAL_EXTRA[$i]=''
     JOURNAL_COUNT=$((JOURNAL_COUNT + 1))
     append_report MOVE "$relative_path" "$target_path" "$STATE_ROOT_PHYSICAL/$backup_path"
 }
 
 journal_link() {
-    local relative_path=$1 source=$2 target_path=$3 temp_path=$4 i=$JOURNAL_COUNT
+    local relative_path=$1 source=$2 target_path=$3 temp_path=$4 recovery_path=$5 i=$JOURNAL_COUNT
     JOURNAL_TYPE[$i]=LINK
     JOURNAL_RELATIVE[$i]=$relative_path
     JOURNAL_FIRST[$i]=$source
     JOURNAL_SECOND[$i]=$target_path
     JOURNAL_IDENTITY[$i]=''
     JOURNAL_AUX[$i]=$temp_path
+    JOURNAL_EXTRA[$i]=$recovery_path
     JOURNAL_COUNT=$((JOURNAL_COUNT + 1))
     append_report LINK "$relative_path" "$source" "$target_path"
 }
@@ -663,27 +679,53 @@ inspect_install_entry() (
     esac
 )
 
-backup_install_target() (
-    local source=$1 target_path=$2 relative_path=$3 backup_path=$4 expected_fingerprint=$5
-    local target_name observed backup_absolute
+stage_backup_target() (
+    local source=$1 target_path=$2 relative_path=$3 stage_path=$4 expected_fingerprint=$5
+    local target_name stage_name observed
     pin_apply_target_parent "$source" "$target_path" "$relative_path" 0 || return $?
     observed=$(artifact_status "$source" "$target_path")
     case "$observed" in DRIFT|MATCH|FOREIGN_LINK) ;; *) return 65 ;; esac
     target_name=${relative_path##*/}
+    stage_name=${stage_path##*/}
+    [[ ! -e "$stage_name" && ! -L "$stage_name" ]] || return 74
     [[ "$(path_fingerprint "$target_name")" == "$expected_fingerprint" ]] || return 65
-    backup_absolute="$STATE_ROOT_PHYSICAL/$backup_path"
-    state_name_matches_pin || return 74
-    install_test_hook before_backup_move "$target_path" "$backup_absolute" || return $?
-    honor_pending_signal || return $?
-    state_name_matches_pin || return 74
+    install_test_hook before_backup_stage "$target_path" "$stage_path" || return $?
     [[ "$(path_fingerprint "$target_name")" == "$expected_fingerprint" ]] || return 65
-    mv -n -- "$target_name" "$backup_absolute" || return 74
+    mv -n -- "$target_name" "$stage_name" || return 74
     honor_pending_signal || return $?
     [[ ! -e "$target_name" && ! -L "$target_name" ]] || return 74
-    [[ "$(path_fingerprint "$backup_absolute")" == "$expected_fingerprint" ]] || return 74
-    install_test_hook after_backup_move "$target_path" "$backup_absolute" || return $?
+    [[ "$(path_fingerprint "$stage_name")" == "$expected_fingerprint" ]] || return 74
+    install_test_hook after_backup_stage "$target_path" "$stage_path" || return $?
     honor_pending_signal || return $?
 )
+
+move_staged_backup() {
+    local target_path=$1 stage_path=$2 backup_path=$3 expected_fingerprint=$4
+    local stage_name container_path backup_display
+    stage_name=${stage_path##*/}
+    backup_display="$STATE_ROOT_PHYSICAL/$backup_path"
+    state_cwd_matches_pin || return 74
+    install_test_hook before_backup_move "$target_path" "$backup_display" || return $?
+    honor_pending_signal || return $?
+    state_cwd_matches_pin || return 74
+    install_test_hook backup_move_after_state_check "$STATE_ROOT" "$backup_display" || return $?
+    honor_pending_signal || return $?
+    refresh_state_physical_from_cwd || return $?
+    mv -n -- "$stage_path" "$backup_path" || return 74
+    honor_pending_signal || return $?
+    if [[ -d "$backup_path" ]]; then
+        container_path="$backup_path/$stage_name"
+        if [[ -e "$container_path" || -L "$container_path" ]]; then
+            mv -n -- "$container_path" "$stage_path" || return 74
+            [[ -e "$stage_path" || -L "$stage_path" ]] || return 74
+        fi
+        return 74
+    fi
+    [[ ! -e "$stage_path" && ! -L "$stage_path" ]] || return 74
+    [[ "$(path_fingerprint "$backup_path")" == "$expected_fingerprint" ]] || return 74
+    install_test_hook after_backup_move "$target_path" "$STATE_ROOT_PHYSICAL/$backup_path" || return $?
+    honor_pending_signal || return $?
+}
 
 create_link_temp() (
     local source=$1 target_path=$2 relative_path=$3 temp_path=$4 target_name temp_name
@@ -711,11 +753,12 @@ inspect_link_temp() (
 )
 
 publish_link_temp() (
-    local source=$1 target_path=$2 relative_path=$3 temp_path=$4 expected_identity=$5
-    local target_name temp_name
+    local source=$1 target_path=$2 relative_path=$3 temp_path=$4 expected_identity=$5 recovery_path=$6
+    local target_name temp_name recovery_name container_path
     pin_apply_target_parent "$source" "$target_path" "$relative_path" 0 || return $?
     target_name=${relative_path##*/}
     temp_name=${temp_path##*/}
+    recovery_name=${recovery_path##*/}
     [[ -L "$temp_name" && "$(readlink "$temp_name")" == "$source" ]] || return 65
     [[ "$(path_identity "$temp_name")" == "$expected_identity" ]] || return 65
     [[ ! -e "$target_name" && ! -L "$target_name" ]] || return 65
@@ -724,60 +767,81 @@ publish_link_temp() (
     [[ -L "$temp_name" && "$(path_identity "$temp_name")" == "$expected_identity" ]] || return 65
     [[ ! -e "$target_name" && ! -L "$target_name" ]] || return 65
     safe_source "$source" || return 65
+    install_test_hook link_publish_after_check "$target_path" "$temp_path" || return $?
+    honor_pending_signal || return $?
     ln -P -- "$temp_name" "$target_name" || return 74
     honor_pending_signal || return $?
+    if [[ -d "$target_name" ]]; then
+        container_path="$target_name/$temp_name"
+        if [[ -L "$container_path" && "$(path_identity "$container_path")" == "$expected_identity" ]]; then
+            [[ ! -e "$recovery_name" && ! -L "$recovery_name" ]] || return 74
+            mv -n -- "$container_path" "$recovery_name" || return 74
+            [[ -L "$recovery_name" && "$(path_identity "$recovery_name")" == "$expected_identity" ]] || return 74
+        fi
+        return 74
+    fi
     [[ -L "$target_name" && "$(path_identity "$target_name")" == "$expected_identity" ]] || return 74
     install_test_hook after_link_publish "$target_path" "$temp_path" || return $?
     honor_pending_signal || return $?
 )
 
-cleanup_link_temp() (
-    local source=$1 target_path=$2 relative_path=$3 temp_path=$4 expected_identity=$5 quarantine_path=$6
-    local temp_name quarantine_absolute
-    pin_apply_target_parent "$source" "$target_path" "$relative_path" 0 || return $?
+move_success_temp_to_quarantine() {
+    local source=$1 temp_path=$2 expected_identity=$3 quarantine_path=$4
+    local temp_name container_path quarantine_display
     temp_name=${temp_path##*/}
-    [[ -L "$temp_name" && "$(readlink "$temp_name")" == "$source" ]] || return 2
-    [[ "$(path_identity "$temp_name")" == "$expected_identity" ]] || return 2
-    quarantine_absolute="$STATE_ROOT_PHYSICAL/$quarantine_path"
-    state_name_matches_pin || return 74
-    install_test_hook before_link_temp_quarantine "$temp_path" "$quarantine_absolute" || return $?
+    [[ -L "$temp_path" && "$(readlink "$temp_path")" == "$source" ]] || return 2
+    [[ "$(path_identity "$temp_path")" == "$expected_identity" ]] || return 2
+    quarantine_display="$STATE_ROOT_PHYSICAL/$quarantine_path"
+    state_cwd_matches_pin || return 74
+    install_test_hook before_link_temp_quarantine "$temp_path" "$quarantine_display" || return $?
     honor_pending_signal || return $?
-    [[ -L "$temp_name" && "$(path_identity "$temp_name")" == "$expected_identity" ]] || return 2
-    mv -n -- "$temp_name" "$quarantine_absolute" || return 74
+    [[ -L "$temp_path" && "$(path_identity "$temp_path")" == "$expected_identity" ]] || return 2
+    mv -n -- "$temp_path" "$quarantine_path" || return 74
     honor_pending_signal
-    [[ ! -e "$temp_name" && ! -L "$temp_name" ]] || return 74
-    [[ -L "$quarantine_absolute" && "$(readlink "$quarantine_absolute")" == "$source" ]] || return 74
-    install_test_hook after_link_temp_quarantine "$temp_path" "$quarantine_absolute" || return $?
+    if [[ -d "$quarantine_path" ]]; then
+        container_path="$quarantine_path/$temp_name"
+        if [[ -e "$container_path" || -L "$container_path" ]]; then
+            mv -n -- "$container_path" "$temp_path" || return 74
+        fi
+        return 74
+    fi
+    [[ ! -e "$temp_path" && ! -L "$temp_path" ]] || return 74
+    [[ -L "$quarantine_path" && "$(readlink "$quarantine_path")" == "$source" ]] || return 74
+    install_test_hook after_link_temp_quarantine "$temp_path" "$STATE_ROOT_PHYSICAL/$quarantine_path" || return $?
     honor_pending_signal
-)
+}
 
 apply_install_entry() {
     local action=$1 source=$2 target_path=$3 relative_path=$4
-    local fingerprint backup_path='' temp_path identity journal_index temp_quarantine
+    local fingerprint backup_path='' backup_stage='' temp_path link_recovery identity journal_index temp_quarantine
 
-    state_cwd_matches_pin && state_name_matches_pin || return 74
+    state_cwd_matches_pin || return 74
     fingerprint=$(inspect_install_entry "$action" "$source" "$target_path" "$relative_path") || return $?
     if [[ "$action" == BACKUP ]]; then
         backup_path="$BACKUP_FILES/$relative_path"
         mkdir -p -- "$(dirname "$backup_path")" || return 74
         [[ ! -e "$backup_path" && ! -L "$backup_path" ]] || return 74
-        journal_move "$relative_path" "$target_path" "$backup_path" "$fingerprint" || return $?
-        backup_install_target "$source" "$target_path" "$relative_path" "$backup_path" "$fingerprint" || return $?
+        journal_index=$JOURNAL_COUNT
+        backup_stage="${target_path%/*}/.dotfiles-backup-$$-$journal_index"
+        journal_move "$relative_path" "$target_path" "$backup_path" "$fingerprint" "$backup_stage" || return $?
+        stage_backup_target "$source" "$target_path" "$relative_path" "$backup_stage" "$fingerprint" || return $?
+        move_staged_backup "$target_path" "$backup_stage" "$backup_path" "$fingerprint" || return $?
         after_transaction_mutation || return $?
     fi
 
     journal_index=$JOURNAL_COUNT
     temp_path="${target_path%/*}/.dotfiles-link-$$-$journal_index"
-    journal_link "$relative_path" "$source" "$target_path" "$temp_path" || return $?
+    link_recovery="${target_path%/*}/.dotfiles-link-recovery-$$-$journal_index"
+    journal_link "$relative_path" "$source" "$target_path" "$temp_path" "$link_recovery" || return $?
     create_link_temp "$source" "$target_path" "$relative_path" "$temp_path" || return $?
     identity=$(inspect_link_temp "$source" "$target_path" "$relative_path" "$temp_path") || return $?
     [[ -n "$identity" ]] || return 65
     set_journal_link_identity "$journal_index" "$identity"
-    publish_link_temp "$source" "$target_path" "$relative_path" "$temp_path" "$identity" || return $?
+    publish_link_temp "$source" "$target_path" "$relative_path" "$temp_path" "$identity" "$link_recovery" || return $?
     after_transaction_mutation || return $?
     temp_quarantine="$QUARANTINE_ROOT/link-$journal_index/success-temp"
     mkdir -p -- "$(dirname "$temp_quarantine")" || return 74
-    cleanup_link_temp "$source" "$target_path" "$relative_path" "$temp_path" "$identity" "$temp_quarantine" || return $?
+    move_success_temp_to_quarantine "$source" "$temp_path" "$identity" "$temp_quarantine" || return $?
 }
 
 pin_rollback_target_parent() {
@@ -790,56 +854,95 @@ pin_rollback_target_parent() {
     pin_existing_install_parent "$relative_path" "$expected_root" || return 2
 }
 
-rollback_quarantine_link_path() (
-    local source=$1 target_path=$2 relative_path=$3 path=$4 quarantine_path=$5 hook_event=$6
-    local name quarantine_absolute parent_before
+restore_local_stage_exact() {
+    local stage_name=$1 destination_name=$2 container_path
+    mv -n -- "$stage_name" "$destination_name" || return 2
+    if [[ -d "$destination_name" ]]; then
+        container_path="$destination_name/$stage_name"
+        if [[ -e "$container_path" || -L "$container_path" ]]; then
+            mv -n -- "$container_path" "$stage_name" || return 2
+        fi
+        return 2
+    fi
+    [[ ! -e "$stage_name" && ! -L "$stage_name" ]] || return 2
+}
+
+stage_rollback_link_path() (
+    local source=$1 target_path=$2 relative_path=$3 path=$4 stage_path=$5 expected_identity=$6 hook_event=$7 allow_unidentified=$8
+    local name stage_name parent_before observed_identity
     pin_rollback_target_parent "$target_path" "$relative_path" || return 2
     name=${path##*/}
     [[ -e "$name" || -L "$name" ]] || return 0
+    stage_name=${stage_path##*/}
+    [[ ! -e "$stage_name" && ! -L "$stage_name" ]] || return 2
     parent_before=$(pwd -P) || return 2
-    quarantine_absolute="$STATE_ROOT_PHYSICAL/$quarantine_path"
-    state_name_matches_pin || return 2
     if [[ -n "$hook_event" ]]; then
-        install_test_hook "$hook_event" "$path" "$quarantine_absolute" || return 2
+        install_test_hook "$hook_event" "$path" "$stage_path" || return 2
     fi
     [[ "$(pwd -P)" == "$parent_before" ]] || return 2
-    state_name_matches_pin || return 2
     [[ -e "$name" || -L "$name" ]] || return 0
-    mv -n -- "$name" "$quarantine_absolute" || return 2
+    mv -n -- "$name" "$stage_name" || return 2
     [[ ! -e "$name" && ! -L "$name" ]] || return 2
-    [[ -e "$quarantine_absolute" || -L "$quarantine_absolute" ]] || return 2
-    if [[ -L "$quarantine_absolute" && "$(readlink "$quarantine_absolute")" == "$source" ]]; then
-        return 0
+    [[ -e "$stage_name" || -L "$stage_name" ]] || return 2
+    observed_identity=$(path_identity "$stage_name") || observed_identity=''
+    if [[ -n "$expected_identity" ]]; then
+        if [[ "$observed_identity" != "$expected_identity" ]]; then
+            restore_local_stage_exact "$stage_name" "$name" || true
+            return 2
+        fi
+    elif [[ "$allow_unidentified" != 1 ]]; then
+        restore_local_stage_exact "$stage_name" "$name" || true
+        return 2
     fi
-    install_test_hook rollback_link_before_restore "$path" "$quarantine_absolute" || return 2
-    mv -n -- "$quarantine_absolute" "$name" || return 2
-    [[ -e "$name" || -L "$name" ]] || return 2
-    [[ ! -e "$quarantine_absolute" && ! -L "$quarantine_absolute" ]] || return 2
+    if [[ ! -L "$stage_name" || "$(readlink "$stage_name")" != "$source" ]]; then
+        restore_local_stage_exact "$stage_name" "$name" || true
+        return 2
+    fi
 )
 
+move_local_stage_to_quarantine() {
+    local stage_path=$1 quarantine_path=$2 stage_name container_path
+    [[ -e "$stage_path" || -L "$stage_path" ]] || return 0
+    stage_name=${stage_path##*/}
+    state_cwd_matches_pin || return 2
+    mv -n -- "$stage_path" "$quarantine_path" || return 2
+    if [[ -d "$quarantine_path" ]]; then
+        container_path="$quarantine_path/$stage_name"
+        if [[ -e "$container_path" || -L "$container_path" ]]; then
+            mv -n -- "$container_path" "$stage_path" || return 2
+        fi
+        return 2
+    fi
+    [[ ! -e "$stage_path" && ! -L "$stage_path" ]] || return 2
+}
+
+rollback_one_link_path() {
+    local source=$1 target_path=$2 relative_path=$3 path=$4 stage_path=$5 quarantine_path=$6 expected_identity=$7 hook_event=$8 allow_unidentified=$9
+    stage_rollback_link_path "$source" "$target_path" "$relative_path" "$path" "$stage_path" "$expected_identity" "$hook_event" "$allow_unidentified" || return $?
+    move_local_stage_to_quarantine "$stage_path" "$quarantine_path"
+}
+
 rollback_link_entry() {
-    local journal_index=$1 relative_path=$2 source=$3 target_path=$4 temp_path=$5
-    local quarantine_dir entry_status status=0
+    local journal_index=$1 relative_path=$2 source=$3 target_path=$4 temp_path=$5 recovery_path=$6 expected_identity=$7
+    local quarantine_dir target_dir entry_status status=0
     quarantine_dir="$QUARANTINE_ROOT/link-$journal_index"
     mkdir -p -- "$quarantine_dir" || return 1
-    rollback_quarantine_link_path "$source" "$target_path" "$relative_path" "$target_path" "$quarantine_dir/final" rollback_link_before_quarantine
+    target_dir=${target_path%/*}
+    rollback_one_link_path "$source" "$target_path" "$relative_path" "$target_path" "$target_dir/.dotfiles-rollback-final-$$-$journal_index" "$quarantine_dir/final" "$expected_identity" rollback_link_before_quarantine 0
     entry_status=$?
     [[ $entry_status -eq 0 ]] || status=$entry_status
-    rollback_quarantine_link_path "$source" "$target_path" "$relative_path" "$temp_path" "$quarantine_dir/temp" ''
+    rollback_one_link_path "$source" "$target_path" "$relative_path" "$temp_path" "$target_dir/.dotfiles-rollback-temp-$$-$journal_index" "$quarantine_dir/temp" "$expected_identity" '' 1
+    entry_status=$?
+    [[ $entry_status -eq 0 ]] || status=$entry_status
+    rollback_one_link_path "$source" "$target_path" "$relative_path" "$recovery_path" "$target_dir/.dotfiles-rollback-recovery-$$-$journal_index" "$quarantine_dir/recovery" "$expected_identity" '' 0
     entry_status=$?
     [[ $entry_status -eq 0 ]] || status=$entry_status
     return "$status"
 }
 
-rollback_move_entry() (
-    local journal_index=$1 relative_path=$2 target_path=$3 backup_path=$4 expected_fingerprint=$5
-    local expected_root target_name backup_absolute stage_name
-    backup_absolute="$STATE_ROOT_PHYSICAL/$backup_path"
-    if [[ ! -e "$backup_absolute" && ! -L "$backup_absolute" ]]; then
-        [[ -e "$target_path" || -L "$target_path" ]] && return 0
-        return 2
-    fi
-    [[ "$(path_fingerprint "$backup_absolute")" == "$expected_fingerprint" ]] || return 2
+publish_restore_stage() (
+    local journal_index=$1 relative_path=$2 target_path=$3 stage_path=$4 expected_fingerprint=$5 backup_display=$6
+    local expected_root target_name stage_name container_path
     TARGET_RELATIVE_PATH=$relative_path
     TARGET_ROOT_PHYSICAL=''
     safe_target "$target_path" || return 2
@@ -847,28 +950,71 @@ rollback_move_entry() (
     [[ -n "$expected_root" ]] || return 2
     pin_existing_install_parent "$relative_path" "$expected_root" || return 2
     target_name=${relative_path##*/}
-    stage_name=".dotfiles-restore-$$-$journal_index"
-    [[ ! -e "$stage_name" && ! -L "$stage_name" ]] || return 2
-    state_name_matches_pin || return 2
-    install_test_hook rollback_move_before_stage "$target_path" "$backup_absolute" || return 2
-    state_name_matches_pin || return 2
-    [[ "$(path_fingerprint "$backup_absolute")" == "$expected_fingerprint" ]] || return 2
-    mv -n -- "$backup_absolute" "$stage_name" || return 2
-    if [[ ! -e "$stage_name" && ! -L "$stage_name" ]]; then
-        return 2
-    fi
-    if [[ "$(path_fingerprint "$stage_name")" != "$expected_fingerprint" ]]; then
-        mv -n -- "$stage_name" "$backup_absolute" || true
-        return 2
-    fi
-    install_test_hook rollback_move_before_restore "$target_path" "$backup_absolute" || return 2
+    stage_name=${stage_path##*/}
+    [[ "$(path_fingerprint "$stage_name")" == "$expected_fingerprint" ]] || return 2
+    install_test_hook rollback_move_before_restore "$target_path" "$backup_display" || return 2
     mv -n -- "$stage_name" "$target_name" || return 2
+    if [[ -d "$target_name" ]]; then
+        container_path="$target_name/$stage_name"
+        if [[ -e "$container_path" || -L "$container_path" ]]; then
+            mv -n -- "$container_path" "$stage_name" || return 2
+        fi
+        return 2
+    fi
     if [[ -e "$stage_name" || -L "$stage_name" ]]; then
-        mv -n -- "$stage_name" "$backup_absolute" || true
         return 2
     fi
     [[ "$(path_fingerprint "$target_name")" == "$expected_fingerprint" ]] || return 2
 )
+
+return_restore_stage_to_backup() {
+    local stage_path=$1 backup_path=$2 stage_name container_path
+    [[ -e "$stage_path" || -L "$stage_path" ]] || return 2
+    stage_name=${stage_path##*/}
+    state_cwd_matches_pin || return 2
+    mv -n -- "$stage_path" "$backup_path" || return 2
+    if [[ -d "$backup_path" ]]; then
+        container_path="$backup_path/$stage_name"
+        if [[ -e "$container_path" || -L "$container_path" ]]; then
+            mv -n -- "$container_path" "$stage_path" || return 2
+        fi
+        return 2
+    fi
+    [[ ! -e "$stage_path" && ! -L "$stage_path" ]] || return 2
+}
+
+rollback_move_entry() {
+    local journal_index=$1 relative_path=$2 target_path=$3 backup_path=$4 expected_fingerprint=$5 backup_stage=$6
+    local restore_stage backup_display backup_name container_path
+    backup_display="$STATE_ROOT_PHYSICAL/$backup_path"
+    restore_stage="${target_path%/*}/.dotfiles-restore-$$-$journal_index"
+    if [[ ( -f "$backup_path" || -L "$backup_path" ) && "$(path_fingerprint "$backup_path")" == "$expected_fingerprint" ]]; then
+        [[ ! -e "$restore_stage" && ! -L "$restore_stage" ]] || return 2
+        install_test_hook rollback_move_before_stage "$target_path" "$backup_display" || return 2
+        backup_name=${backup_path##*/}
+        mv -n -- "$backup_path" "$restore_stage" || return 2
+        if [[ -d "$restore_stage" ]]; then
+            container_path="$restore_stage/$backup_name"
+            if [[ -e "$container_path" || -L "$container_path" ]]; then
+                mv -n -- "$container_path" "$backup_path" || return 2
+            fi
+            return 2
+        fi
+        [[ "$(path_fingerprint "$restore_stage")" == "$expected_fingerprint" ]] || return 2
+    elif [[ -e "$backup_stage" || -L "$backup_stage" ]]; then
+        [[ "$(path_fingerprint "$backup_stage")" == "$expected_fingerprint" ]] || return 2
+        restore_stage=$backup_stage
+    else
+        [[ -e "$target_path" || -L "$target_path" ]] && return 0
+        return 2
+    fi
+    publish_restore_stage "$journal_index" "$relative_path" "$target_path" "$restore_stage" "$expected_fingerprint" "$backup_display"
+    if [[ $? -eq 0 ]]; then
+        return 0
+    fi
+    return_restore_stage_to_backup "$restore_stage" "$backup_path" || true
+    return 2
+}
 
 rollback_transaction() {
     local i status=0 entry_status relative_path
@@ -877,11 +1023,11 @@ rollback_transaction() {
         relative_path=${JOURNAL_RELATIVE[$i]}
         case "${JOURNAL_TYPE[$i]}" in
             LINK)
-                rollback_link_entry "$i" "$relative_path" "${JOURNAL_FIRST[$i]}" "${JOURNAL_SECOND[$i]}" "${JOURNAL_AUX[$i]}"
+                rollback_link_entry "$i" "$relative_path" "${JOURNAL_FIRST[$i]}" "${JOURNAL_SECOND[$i]}" "${JOURNAL_AUX[$i]}" "${JOURNAL_EXTRA[$i]}" "${JOURNAL_IDENTITY[$i]}"
                 entry_status=$?
                 ;;
             MOVE)
-                rollback_move_entry "$i" "$relative_path" "${JOURNAL_FIRST[$i]}" "${JOURNAL_SECOND[$i]}" "${JOURNAL_IDENTITY[$i]}"
+                rollback_move_entry "$i" "$relative_path" "${JOURNAL_FIRST[$i]}" "${JOURNAL_SECOND[$i]}" "${JOURNAL_IDENTITY[$i]}" "${JOURNAL_AUX[$i]}"
                 entry_status=$?
                 ;;
             *) entry_status=2 ;;
@@ -901,6 +1047,32 @@ cleanup_transaction_storage() {
     [[ -n "$QUARANTINE_ROOT" ]] && rmdir -- "$QUARANTINE_ROOT" 2>/dev/null || true
     [[ -n "$TRANSACTION_ROOT" ]] && rmdir -- "$TRANSACTION_ROOT" 2>/dev/null || true
     rmdir -- transactions 2>/dev/null || true
+}
+
+prune_success_transaction() {
+    local tombstone=".transaction-prune-$$" nested transaction_name identity
+    [[ -n "$TRANSACTION_ROOT" && -d "$TRANSACTION_ROOT" && ! -L "$TRANSACTION_ROOT" ]] || return 0
+    [[ "$(path_identity "$TRANSACTION_ROOT")" == "$TRANSACTION_ROOT_IDENTITY" ]] || return 74
+    [[ ! -e "$tombstone" && ! -L "$tombstone" ]] || return 74
+    transaction_name=${TRANSACTION_ROOT##*/}
+    mv -n -- "$TRANSACTION_ROOT" "$tombstone" || return 74
+    if [[ -d "$tombstone" ]]; then
+        identity=$(path_identity "$tombstone") || identity=''
+        if [[ "$identity" != "$TRANSACTION_ROOT_IDENTITY" ]]; then
+            nested="$tombstone/$transaction_name"
+            if [[ -e "$nested" || -L "$nested" ]]; then
+                mv -n -- "$nested" "$TRANSACTION_ROOT" || return 74
+            fi
+            return 74
+        fi
+    else
+        return 74
+    fi
+    find "$tombstone" -depth -delete || return 74
+    [[ ! -e "$tombstone" && ! -L "$tombstone" ]] || return 74
+    rmdir -- transactions 2>/dev/null || true
+    TRANSACTION_ROOT=''
+    QUARANTINE_ROOT=''
 }
 
 transaction_trap() {
@@ -939,7 +1111,7 @@ finish_transaction() {
     CLEANUP_ACTIVE=1
     install_test_hook during_cleanup "$STATE_ROOT" || true
     TRANSACTION_ACTIVE=0
-    cleanup_transaction_storage
+    prune_success_transaction || status=$?
     release_lock || status=$?
     cd -P -- "$TRANSACTION_START_DIR" || { [[ $status -ne 0 ]] || status=65; }
     trap - EXIT INT TERM

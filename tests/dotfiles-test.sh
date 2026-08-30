@@ -716,6 +716,149 @@ STUB
     assert_not_exists "$TEST_TMP/state.pinned/install.lock"
 }
 
+test_install_rollback_restores_same_target_different_identity() {
+    local hook backup replacement_identity
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/replace-with-same-target-link"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = rollback_link_before_quarantine ]; then
+    /bin/rm -- "$TEST_TMP/home/.config/demo/config"
+    /bin/ln -s "$TEST_TMP/repo/home/.config/demo/config" "$TEST_TMP/home/.config/demo/config"
+    /bin/ls -di "$TEST_TMP/home/.config/demo/config" >"$TEST_TMP/replacement-identity"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" DOTFILES_TEST_FAIL_AFTER=2 run_cli install --apply --backup
+    assert_status 70 && assert_contains 'ROLLBACK_REFUSED .config/demo/config' || return 1
+    replacement_identity="$(<"$TEST_TMP/replacement-identity")"
+    [[ -L "$TEST_TMP/home/.config/demo/config" ]] || return 1
+    [[ "$(readlink "$TEST_TMP/home/.config/demo/config")" == "$TEST_TMP/repo/home/.config/demo/config" ]] || return 1
+    [[ "$(ls -di "$TEST_TMP/home/.config/demo/config")" == "$replacement_identity" ]] || return 1
+    backup="$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config' -type f -print)"
+    [[ -n "$backup" && "$(<"$backup")" == existing ]]
+}
+
+test_install_backup_directory_arrival_recovers_source() {
+    local hook backup_dir
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/backup-directory-arrival"
+    cat >"$hook" <<'STUB'
+#!/bin/sh
+if [ "$1" = before_backup_move ]; then
+    mkdir "$3"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    assert_status 74 || return 1
+    [[ ! -L "$TEST_TMP/home/.config/demo/config" && "$(<"$TEST_TMP/home/.config/demo/config")" == existing ]] || return 1
+    backup_dir="$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config' -type d -print)"
+    [[ -n "$backup_dir" && -z "$(find "$backup_dir" ! -path "$backup_dir" -print)" ]] || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock"
+}
+
+test_install_restore_directory_arrival_preserves_backup() {
+    local hook backup target
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/restore-directory-arrival"
+    cat >"$hook" <<'STUB'
+#!/bin/sh
+if [ "$1" = rollback_move_before_restore ]; then
+    mkdir "$2"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" DOTFILES_TEST_FAIL_AFTER=2 run_cli install --apply --backup
+    assert_status 70 || return 1
+    target="$TEST_TMP/home/.config/demo/config"
+    [[ -d "$target" && -z "$(find "$target" ! -path "$target" -print)" ]] || return 1
+    backup="$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config' -type f -print)"
+    [[ -n "$backup" && "$(<"$backup")" == existing ]] || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock"
+}
+
+test_install_state_swap_after_check_keeps_pinned_backup() {
+    local hook backup
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo" "$TEST_TMP/outside-state"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/swap-state-after-check"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = backup_move_after_state_check ]; then
+    /bin/mv "$TEST_TMP/state" "$TEST_TMP/state.pinned"
+    /bin/ln -s "$TEST_TMP/outside-state" "$TEST_TMP/state"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    assert_status 0 || return 1
+    backup="$(find "$TEST_TMP/state.pinned/backups" -path '*/files/.config/demo/config' -type f -print)"
+    [[ -n "$backup" && "$(<"$backup")" == existing ]] || return 1
+    assert_not_exists "$TEST_TMP/outside-state/install.lock" || return 1
+    assert_not_exists "$TEST_TMP/outside-state/backups"
+}
+
+test_install_link_publication_directory_arrival_is_recovered() {
+    local hook target backup
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/link-publication-directory-arrival"
+    cat >"$hook" <<'STUB'
+#!/bin/sh
+if [ "$1" = link_publish_after_check ]; then
+    mkdir "$2"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || return 1
+    target="$TEST_TMP/home/.config/demo/config"
+    [[ -d "$target" && -z "$(find "$target" ! -path "$target" -print)" ]] || return 1
+    backup="$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config' -type f -print)"
+    [[ -n "$backup" && "$(<"$backup")" == existing ]] || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock"
+}
+
+test_install_success_transactions_are_pruned() {
+    local i
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+
+    for i in 1 2 3; do
+        printf 'existing-%s\n' "$i" >"$TEST_TMP/home/.config/demo/config"
+        run_cli install --apply --backup
+        assert_status 0 || return 1
+        rm "$TEST_TMP/home/.config/demo/config"
+    done
+    [[ -z "$(find "$TEST_TMP/state/transactions" -mindepth 1 -print 2>/dev/null)" ]]
+}
+
 test_install_blocks_symlinked_parent() {
     new_fixture
     mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/outside"
@@ -873,6 +1016,12 @@ run_test test_install_signal_after_link_publish_rolls_back_intent
 run_test test_install_signal_at_lock_acquisition_releases_lock
 run_test test_install_signal_during_cleanup_preserves_failure_status
 run_test test_install_state_root_swap_never_redirects_transaction
+run_test test_install_rollback_restores_same_target_different_identity
+run_test test_install_backup_directory_arrival_recovers_source
+run_test test_install_restore_directory_arrival_preserves_backup
+run_test test_install_state_swap_after_check_keeps_pinned_backup
+run_test test_install_link_publication_directory_arrival_is_recovered
+run_test test_install_success_transactions_are_pruned
 run_test test_install_blocks_symlinked_parent
 run_test test_install_rechecks_source_after_parent_preparation
 run_test test_install_does_not_follow_parent_swapped_before_mkdir
