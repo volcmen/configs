@@ -5,7 +5,7 @@ PROGRAM=${0##*/}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 MANIFEST="$REPO_ROOT/dotfiles.manifest"
-SOURCE_ROOT="$REPO_ROOT/home"
+SOURCE_ROOT="$(cd "$REPO_ROOT/home" && pwd -P)"
 
 MF_APP=(); MF_PLATFORMS=(); MF_KIND=(); MF_PATH=()
 MF_VALIDATOR=(); MF_REQUIRED=(); MF_TESTED=()
@@ -17,7 +17,8 @@ Usage: dotfiles <command> [options]
 Commands:
   detect                  print the physical host platform
   check [--target NAME]   validate canonical configuration
-  diff                    compare canonical and live state
+  diff [--target NAME] [--staging-home DIR]
+                          compare canonical and live state
   install [--apply] [--backup]
                           preview or apply the installation plan
   help                    show this help
@@ -121,17 +122,197 @@ detect_host() {
     local kernel id
     kernel=$(kernel_name)
     case "$kernel" in
-        Darwin) printf 'macos\n' ;;
+        Darwin) HOST_PLATFORM=macos ;;
         Linux)
             id=$(os_release_id) || die 69 'unsupported host: Linux without readable ID'
             [[ "$id" == arch ]] || die 69 "unsupported host: Linux ID=$id"
-            printf 'arch\n'
+            HOST_PLATFORM=arch
             ;;
         *) die 69 "unsupported host kernel: $kernel" ;;
     esac
+    printf '%s\n' "$HOST_PLATFORM"
+}
+
+effective_home() {
+    if [[ ${DOTFILES_TESTING:-0} == 1 && -n ${DOTFILES_TEST_HOME:-} ]]; then
+        printf '%s\n' "$DOTFILES_TEST_HOME"
+    elif [[ -n ${HOME:-} ]]; then
+        printf '%s\n' "$HOME"
+    else
+        die 65 'HOME is not set'
+    fi
+}
+
+validation_target() {
+    local requested=${DOTFILES_TARGET:-} option_seen=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --target)
+                [[ $# -ge 2 && -n "$2" ]] || die 64 '--target requires a platform'
+                [[ $option_seen -eq 0 ]] || die 64 '--target may only be specified once'
+                requested=$2
+                option_seen=1
+                shift 2
+                ;;
+            *) die 64 "unknown option: $1" ;;
+        esac
+    done
+    if [[ -z "$requested" ]]; then
+        detect_host >/dev/null
+        requested=$HOST_PLATFORM
+    fi
+    case "$requested" in macos|arch) ;; *) die 64 "unknown target platform: $requested" ;; esac
+    VALIDATION_TARGET=$requested
+}
+
+physical_dir() {
+    (cd "$1" 2>/dev/null && pwd -P)
+}
+
+path_within() {
+    local path=$1 root=$2
+    if [[ "$root" == / ]]; then
+        [[ "$path" == /* ]]
+    else
+        [[ "$path" == "$root" || "$path" == "$root"/* ]]
+    fi
+}
+
+safe_source() {
+    local source=$1 parent
+    [[ -f "$source" && ! -L "$source" ]] || return 1
+    parent=$(physical_dir "$(dirname "$source")") || return 1
+    path_within "$parent" "$SOURCE_ROOT"
+}
+
+safe_target() {
+    local target=$1 current physical component i
+    local components=()
+    [[ -n ${EFFECTIVE_HOME:-} && -n ${TARGET_RELATIVE_PATH:-} ]] || return 1
+    current=$EFFECTIVE_HOME
+    if [[ -e "$current" || -L "$current" ]]; then
+        [[ -d "$current" ]] || return 1
+        TARGET_ROOT_PHYSICAL=$(physical_dir "$current") || return 1
+    else
+        return 0
+    fi
+    IFS=/ read -r -a components <<<"$TARGET_RELATIVE_PATH"
+    for ((i=0; i<${#components[@]}-1; i++)); do
+        component=${components[$i]}
+        current="$current/$component"
+        [[ -L "$current" ]] && return 1
+        if [[ -e "$current" && ! -d "$current" ]]; then
+            return 1
+        fi
+        if [[ -d "$current" ]]; then
+            physical=$(physical_dir "$current") || return 1
+            path_within "$physical" "$TARGET_ROOT_PHYSICAL" || return 1
+        fi
+    done
+    [[ "$target" == "$current" || "$target" == "$current"/* || "$target" == "$EFFECTIVE_HOME/$TARGET_RELATIVE_PATH" ]] || return 1
+}
+
+artifact_status() {
+    local source=$1 target=$2 link
+    safe_source "$source" && safe_target "$target" || { printf 'BLOCKED\n'; return; }
+    if [[ -L "$target" ]]; then
+        link=$(readlink "$target")
+        [[ "$link" == "$source" ]] && printf 'LINKED\n' || printf 'FOREIGN_LINK\n'
+    elif [[ -d "$target" ]]; then
+        printf 'TYPE_CONFLICT\n'
+    elif [[ -f "$target" ]]; then
+        cmp -s "$source" "$target" && printf 'MATCH\n' || printf 'DRIFT\n'
+    elif [[ -e "$target" ]]; then
+        printf 'TYPE_CONFLICT\n'
+    else
+        printf 'MISSING\n'
+    fi
+}
+
+text_artifact() {
+    ! LC_ALL=C od -An -tx1 "$1" | grep -Eq '(^|[[:space:]])00([[:space:]]|$)'
+}
+
+command_diff() {
+    local staging_home='' staging_seen=0 target_option='' target_seen=0 host target target_home source target_path status
+    local i drift=0 blocked=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --target)
+                [[ $# -ge 2 && -n "$2" ]] || die 64 '--target requires a platform'
+                [[ $target_seen -eq 0 ]] || die 64 '--target may only be specified once'
+                target_option=$2
+                target_seen=1
+                shift 2
+                ;;
+            --staging-home)
+                [[ $# -ge 2 && -n "$2" ]] || die 64 '--staging-home requires a directory'
+                [[ $staging_seen -eq 0 ]] || die 64 '--staging-home may only be specified once'
+                staging_home=$2
+                staging_seen=1
+                shift 2
+                ;;
+            *) die 64 "unknown option: $1" ;;
+        esac
+    done
+    if [[ -n "$target_option" ]]; then
+        validation_target --target "$target_option"
+    else
+        validation_target
+    fi
+    target=$VALIDATION_TARGET
+    detect_host >/dev/null
+    host=$HOST_PLATFORM
+    if [[ "$target" != "$host" && -z "$staging_home" ]]; then
+        die 64 "target $target requires --staging-home"
+    fi
+    if [[ -n "$staging_home" ]]; then
+        target_home=$staging_home
+    else
+        target_home=$(effective_home)
+    fi
+    [[ "$target_home" == / ]] || target_home=${target_home%/}
+    [[ -n "$target_home" ]] || die 65 'effective home is empty'
+    EFFECTIVE_HOME=$target_home
+    parse_manifest "$MANIFEST"
+    for ((i=0; i<${#MF_PATH[@]}; i++)); do
+        platform_selected "${MF_PLATFORMS[$i]}" "$target" || continue
+        TARGET_RELATIVE_PATH=${MF_PATH[$i]}
+        source="$SOURCE_ROOT/${MF_PATH[$i]}"
+        if [[ "$EFFECTIVE_HOME" == / ]]; then
+            target_path="/${MF_PATH[$i]}"
+        else
+            target_path="$EFFECTIVE_HOME/${MF_PATH[$i]}"
+        fi
+        status=$(artifact_status "$source" "$target_path")
+        printf '%s %s %s\n' "$status" "${MF_APP[$i]}" "${MF_PATH[$i]}"
+        case "$status" in
+            LINKED|MATCH) ;;
+            BLOCKED) blocked=1 ;;
+            *) drift=1 ;;
+        esac
+        if [[ "$status" == DRIFT ]] && text_artifact "$source" && text_artifact "$target_path"; then
+            diff -u "$source" "$target_path" || true
+        fi
+    done
+    [[ $blocked -eq 0 ]] || return 65
+    [[ $drift -eq 0 ]] || return 1
+    return 0
+}
+
+command_install() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --target) die 64 'install does not accept --target' ;;
+            --staging-home) die 64 'install does not accept --staging-home' ;;
+            *) die 69 'install is not implemented' ;;
+        esac
+    done
+    die 69 'install is not implemented'
 }
 
 check() {
+    validation_target "$@"
     parse_manifest "$MANIFEST"
 }
 
@@ -142,7 +323,8 @@ main() {
         help|-h|--help) usage ;;
         detect) detect_host ;;
         check) check "$@" ;;
-        diff|install) die 69 "$command is not implemented" ;;
+        diff) command_diff "$@" ;;
+        install) command_install "$@" ;;
         *) die 64 "unknown command: $command" ;;
     esac
 }

@@ -147,6 +147,113 @@ test_manifest_rejects_unknown_required_value() {
     assert_status 65 && assert_contains 'manifest line 1'
 }
 
+test_diff_classifies_every_target_state() {
+    local linked_source
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/missing"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/match"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/drift"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/linked"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/foreign"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/conflict"
+    write_manifest $'demo|macos|file|.config/demo/missing|plain|yes|1\ndemo|macos|file|.config/demo/match|plain|yes|1\ndemo|macos|file|.config/demo/drift|plain|yes|1\ndemo|macos|file|.config/demo/linked|plain|yes|1\ndemo|macos|file|.config/demo/foreign|plain|yes|1\ndemo|macos|file|.config/demo/conflict|plain|yes|1'
+    printf 'canonical\n' >"$TEST_TMP/home/.config/demo/match"
+    printf 'different\n' >"$TEST_TMP/home/.config/demo/drift"
+    linked_source="$(cd "$TEST_TMP/repo/home/.config/demo" && pwd -P)/linked"
+    ln -s "$linked_source" "$TEST_TMP/home/.config/demo/linked"
+    ln -s "$TEST_TMP/repo/home/.config/demo/foreign" "$TEST_TMP/home/.config/demo/foreign"
+    mkdir "$TEST_TMP/home/.config/demo/conflict"
+    run_cli diff
+    assert_status 1 && \
+        assert_contains 'MISSING demo .config/demo/missing' && \
+        assert_contains 'MATCH demo .config/demo/match' && \
+        assert_contains 'DRIFT demo .config/demo/drift' && \
+        assert_contains 'LINKED demo .config/demo/linked' && \
+        assert_contains 'FOREIGN_LINK demo .config/demo/foreign' && \
+        assert_contains 'TYPE_CONFLICT demo .config/demo/conflict' && \
+        assert_contains '@@'
+}
+
+test_diff_never_prints_binary_drift() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\000' >"$TEST_TMP/repo/home/.config/demo/binary"
+    printf 'different\000' >"$TEST_TMP/home/.config/demo/binary"
+    write_manifest 'demo|macos|file|.config/demo/binary|plain|yes|1'
+    run_cli diff
+    assert_status 1 && assert_contains 'DRIFT demo .config/demo/binary' && [[ "$CLI_OUTPUT" != *'canonical'* ]] && [[ "$CLI_OUTPUT" != *'different'* ]]
+}
+
+test_diff_prints_text_drift_at_hex_byte_boundary() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf '0\n' >"$TEST_TMP/repo/home/.config/demo/text"
+    printf '1\n' >"$TEST_TMP/home/.config/demo/text"
+    write_manifest 'demo|macos|file|.config/demo/text|plain|yes|1'
+    run_cli diff
+    assert_status 1 && assert_contains 'DRIFT demo .config/demo/text' && assert_contains '@@'
+}
+
+test_diff_refuses_cross_platform_live_home() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|arch|file|.config/demo/config|plain|yes|1'
+    DOTFILES_TARGET=arch run_cli diff
+    assert_status 64 && assert_contains 'requires --staging-home' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/config"
+}
+
+test_diff_allows_read_only_cross_platform_staging() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/staging"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|arch|file|.config/demo/config|plain|yes|1'
+    run_cli diff --target arch --staging-home "$TEST_TMP/staging"
+    assert_status 1 && assert_contains 'MISSING demo .config/demo/config' || return 1
+    assert_not_exists "$TEST_TMP/staging/.config/demo/config"
+}
+
+test_diff_blocks_unsafe_source_paths() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo" "$TEST_TMP/outside"
+    printf 'canonical\n' >"$TEST_TMP/outside/config"
+    ln -s "$TEST_TMP/outside/config" "$TEST_TMP/repo/home/.config/demo/symlink-file"
+    ln -s "$TEST_TMP/outside" "$TEST_TMP/repo/home/.config/escaped-parent"
+    write_manifest $'demo|macos|file|.config/demo/symlink-file|plain|yes|1\ndemo|macos|file|.config/escaped-parent/config|plain|yes|1'
+    run_cli diff
+    assert_status 65 && \
+        assert_contains 'BLOCKED demo .config/demo/symlink-file' && \
+        assert_contains 'BLOCKED demo .config/escaped-parent/config'
+}
+
+test_diff_blocks_unsafe_target_ancestors() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/outside"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    ln -s "$TEST_TMP/outside" "$TEST_TMP/home/.config"
+    run_cli diff
+    assert_status 65 && assert_contains 'BLOCKED demo .config/demo/config' || return 1
+
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    printf 'not a directory\n' >"$TEST_TMP/home/.config"
+    run_cli diff
+    assert_status 65 && assert_contains 'BLOCKED demo .config/demo/config'
+}
+
+test_install_rejects_target_and_staging_options() {
+    new_fixture
+    run_cli install --target arch
+    assert_status 64 && assert_contains 'install does not accept --target'
+    run_cli install --staging-home "$TEST_TMP/staging"
+    assert_status 64 && assert_contains 'install does not accept --staging-home'
+}
+
 test_dotfiles_copy_dispatches_portably() {
     local helper="$PROJECT_ROOT/home/.local/bin/dotfiles-copy"
     local stub_path empty_path output status
@@ -192,6 +299,14 @@ run_test test_manifest_rejects_unknown_platform
 run_test test_manifest_rejects_unknown_kind
 run_test test_manifest_rejects_unknown_validator
 run_test test_manifest_rejects_unknown_required_value
+run_test test_diff_classifies_every_target_state
+run_test test_diff_never_prints_binary_drift
+run_test test_diff_prints_text_drift_at_hex_byte_boundary
+run_test test_diff_refuses_cross_platform_live_home
+run_test test_diff_allows_read_only_cross_platform_staging
+run_test test_diff_blocks_unsafe_source_paths
+run_test test_diff_blocks_unsafe_target_ancestors
+run_test test_install_rejects_target_and_staging_options
 run_test test_dotfiles_copy_dispatches_portably
 printf '%s passed; %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 [[ "$FAIL_COUNT" -eq 0 ]]
