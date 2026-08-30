@@ -2,11 +2,14 @@
 # entries in nested fish sessions (for example, kitty -> zellij -> fish).
 set --export BUN_INSTALL "$HOME/.bun"
 fish_add_path --path --move --prepend \
-    /opt/homebrew/bin \
     "$HOME/.local/bin" \
     "$BUN_INSTALL/bin" \
     "$HOME/.opencode/bin" \
     "$HOME/.lmstudio/bin"
+
+if test -d /opt/homebrew/bin
+    fish_add_path --path --move --prepend /opt/homebrew/bin
+end
 
 if status is-interactive
     if command -q starship
@@ -33,15 +36,32 @@ if status is-interactive
     end
 
     # Modern replacements.
-    alias ls "eza --icons"
-    alias tree "eza --tree --icons"
-    alias cat "bat --plain"
-    alias cd z
-    alias find fd
+    if command -q eza
+        alias ls "eza --icons"
+        alias tree "eza --tree --icons"
+    end
+
+    if command -q bat
+        alias cat "bat --plain"
+    end
+
+    if command -q zoxide
+        alias cd z
+    end
+
+    if command -q fd
+        alias find fd
+    end
 
     # Shorthands.
-    alias nv nvim
-    alias lg lazygit
+    if command -q nvim
+        alias nv nvim
+    end
+
+    if command -q lazygit
+        alias lg lazygit
+    end
+
     alias clauded "claude --agent controller --model fable --effort medium --dangerously-skip-permissions"
 end
 

@@ -1439,6 +1439,26 @@ test_shared_terminal_behavior_is_canonical() {
     grep -Fq 'copy_command "dotfiles-copy"' "$zellij" || return 1
 }
 
+test_shared_fish_yazi_and_fontconfig_are_portable() {
+    local fish_config="$PROJECT_ROOT/home/.config/fish/config.fish"
+    local yazi_keymap="$PROJECT_ROOT/home/.config/yazi/keymap.toml"
+    local fonts_conf="$PROJECT_ROOT/home/.config/fontconfig/fonts.conf"
+    local readability_conf="$PROJECT_ROOT/home/.config/fontconfig/conf.d/99-readability.conf"
+    local readability_backup="$PROJECT_ROOT/home/.config/fontconfig/conf.d/99-readability.conf.backup"
+    local tool
+
+    grep -Fq 'if test -d /opt/homebrew/bin' "$fish_config" || return 1
+    for tool in eza bat zoxide fd nvim lazygit; do
+        grep -Fq "if command -q $tool" "$fish_config" || return 1
+    done
+    grep -Fq 'for = "linux"' "$yazi_keymap" || return 1
+    grep -Fq 'wl-copy -t text/uri-list' "$yazi_keymap" || return 1
+    grep -Fq 'for = "macos"' "$yazi_keymap" || return 1
+    grep -Fq 'pbcopy' "$yazi_keymap" || return 1
+    assert_not_exists "$readability_backup" || return 1
+    xmllint --noout "$fonts_conf" "$readability_conf"
+}
+
 run_test test_help
 run_test test_unknown_command_fails
 run_test test_detects_macos_and_ignores_target
@@ -1515,5 +1535,6 @@ run_test test_install_does_not_follow_parent_swapped_before_mkdir
 run_test test_install_rejects_home_swapped_before_pinning
 run_test test_dotfiles_copy_dispatches_portably
 run_test test_shared_terminal_behavior_is_canonical
+run_test test_shared_fish_yazi_and_fontconfig_are_portable
 printf '%s passed; %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 [[ "$FAIL_COUNT" -eq 0 ]]

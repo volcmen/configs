@@ -4,7 +4,13 @@ run = "plugin mount"
 
 [[mgr.prepend_keymap]]
 on  = "y"
+for = "linux"
 run = [ 'shell -- for path in %s; do echo "file://$path"; done | wl-copy -t text/uri-list', "yank" ]
+
+[[mgr.prepend_keymap]]
+on  = "y"
+for = "macos"
+run = [ 'shell -- for path in %s; do echo "file://$path"; done | pbcopy', "yank" ]
 
 [[mgr.prepend_keymap]]
 on = ["R","b"]
