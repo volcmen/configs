@@ -234,6 +234,80 @@ STUB
         assert_contains 'RUNTIME UNVERIFIED hyprland .config/hypr/hyprland.lua: requires an Arch Hyprland session'
 }
 
+test_check_caches_clean_hyprland_runtime_probe() {
+    local validator_bin
+    new_fixture
+    validator_bin="$TEST_TMP/validator-bin"
+    mkdir -p "$validator_bin" "$TEST_TMP/repo/home/.config/hypr"
+    printf 'return {}\n' >"$TEST_TMP/repo/home/.config/hypr/one.lua"
+    printf 'return {}\n' >"$TEST_TMP/repo/home/.config/hypr/two.lua"
+    printf 'return {}\n' >"$TEST_TMP/repo/home/.config/hypr/three.lua"
+    write_os_release 'ID=arch'
+    write_manifest $'hyprland|arch|file|.config/hypr/one.lua|hyprland-lua|yes|1\nhyprland|arch|file|.config/hypr/two.lua|hyprland-lua|yes|1\nhyprland|arch|file|.config/hypr/three.lua|hyprland-lua|yes|1'
+    cat >"$validator_bin/luac" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+    cat >"$validator_bin/hyprctl" <<STUB
+#!/bin/sh
+printf '%s\\n' "\$*" >>"$TEST_TMP/hyprctl-calls"
+exit 0
+STUB
+    chmod +x "$validator_bin/luac" "$validator_bin/hyprctl"
+    DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" HYPRLAND_INSTANCE_SIGNATURE=active run_cli check --target arch
+    assert_status 0 && \
+        [[ "$(wc -l <"$TEST_TMP/hyprctl-calls")" -eq 1 ]] && \
+        [[ "$(printf '%s\n' "$CLI_OUTPUT" | /usr/bin/grep -c 'Hyprland runtime validation passed')" -eq 3 ]]
+}
+
+test_check_blocks_hyprland_runtime_error_text_with_success_status() {
+    local validator_bin
+    new_fixture
+    validator_bin="$TEST_TMP/validator-bin"
+    mkdir -p "$validator_bin" "$TEST_TMP/repo/home/.config/hypr"
+    printf 'return {}\n' >"$TEST_TMP/repo/home/.config/hypr/one.lua"
+    printf 'return {}\n' >"$TEST_TMP/repo/home/.config/hypr/two.lua"
+    printf 'return {}\n' >"$TEST_TMP/repo/home/.config/hypr/three.lua"
+    write_os_release 'ID=arch'
+    write_manifest $'hyprland|arch|file|.config/hypr/one.lua|hyprland-lua|yes|1\nhyprland|arch|file|.config/hypr/two.lua|hyprland-lua|yes|1\nhyprland|arch|file|.config/hypr/three.lua|hyprland-lua|yes|1'
+    cat >"$validator_bin/luac" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+    cat >"$validator_bin/hyprctl" <<STUB
+#!/bin/sh
+printf '%s\\n' "\$*" >>"$TEST_TMP/hyprctl-calls"
+printf 'Config error: invalid monitor rule\\n'
+exit 0
+STUB
+    chmod +x "$validator_bin/luac" "$validator_bin/hyprctl"
+    DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" HYPRLAND_INSTANCE_SIGNATURE=active run_cli check --target arch
+    assert_status 1 && \
+        [[ "$(wc -l <"$TEST_TMP/hyprctl-calls")" -eq 1 ]] && \
+        [[ "$(printf '%s\n' "$CLI_OUTPUT" | /usr/bin/grep -c '^BLOCKED hyprland')" -eq 3 ]] && \
+        assert_contains 'Config error: invalid monitor rule'
+}
+
+test_check_sanitizes_validator_control_diagnostics() {
+    local validator_bin
+    new_fixture
+    validator_bin="$TEST_TMP/validator-bin"
+    mkdir -p "$validator_bin" "$TEST_TMP/repo/home/.config/demo"
+    printf 'malformed\n' >"$TEST_TMP/repo/home/.config/demo/config.fish"
+    write_manifest 'fish-app|macos|file|.config/demo/config.fish|fish|yes|1'
+    cat >"$validator_bin/fish" <<'STUB'
+#!/bin/sh
+printf 'useful diagnostic \033[31mwith control\001\007\n' >&2
+exit 9
+STUB
+    chmod +x "$validator_bin/fish"
+    DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" run_cli check --target macos
+    assert_status 1 && \
+        assert_contains 'useful diagnostic' && \
+        [[ "$CLI_OUTPUT" != *$'\033'* && "$CLI_OUTPUT" != *$'\001'* && "$CLI_OUTPUT" != *$'\007'* ]] && \
+        ! LC_ALL=C /usr/bin/printf '%s' "$CLI_OUTPUT" | /usr/bin/grep -q '[[:cntrl:]]'
+}
+
 test_check_never_executes_manifest_validator_text() {
     new_fixture
     mkdir -p "$TEST_TMP/repo/home/.config/demo"
@@ -1318,6 +1392,9 @@ run_test test_check_blocks_malformed_files_with_available_validators
 run_test test_check_passes_valid_file
 run_test test_check_marks_missing_native_validator_runtime_unverified
 run_test test_check_marks_arch_hyprland_static_only_on_macos
+run_test test_check_caches_clean_hyprland_runtime_probe
+run_test test_check_blocks_hyprland_runtime_error_text_with_success_status
+run_test test_check_sanitizes_validator_control_diagnostics
 run_test test_check_never_executes_manifest_validator_text
 run_test test_diff_classifies_every_target_state
 run_test test_diff_never_prints_binary_drift

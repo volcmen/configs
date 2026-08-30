@@ -26,6 +26,7 @@ JOURNAL_AUX=(); JOURNAL_AUX_RELATIVE=(); JOURNAL_EXTRA=(); JOURNAL_EXTRA_RELATIV
 JOURNAL_COUNT=0; MUTATION_COUNT=0; TEST_FAIL_AFTER=''
 TRANSACTION_ACTIVE=0; CLEANUP_ACTIVE=0; PENDING_SIGNAL=0
 TRANSACTION_MOVE_STYLE=''
+HYPRLAND_RUNTIME_PROBED=0; HYPRLAND_RUNTIME_STATUS=125; HYPRLAND_RUNTIME_DETAIL=''
 
 usage() {
     cat <<'USAGE'
@@ -318,36 +319,66 @@ run_validator() {
 }
 
 validation_detail() {
-    local detail=$1 status=$2
+    local detail=$1 status=$2 had_detail=0
+    [[ -n "$detail" ]] && had_detail=1
     detail=${detail//$'\r'/ }
     detail=${detail//$'\n'/ }
+    detail=$(LC_ALL=C printf '%s' "$detail" | LC_ALL=C tr -d '\000-\037\177-\237')
     detail=${detail#"${detail%%[![:space:]]*}"}
     detail=${detail%"${detail##*[![:space:]]}"}
     if [[ -z "$detail" ]]; then
+        if [[ $had_detail -eq 1 && $status -eq 0 ]]; then
+            printf 'validator reported diagnostic output'
+            return
+        fi
         printf 'validator exited %s' "$status"
     else
         printf '%s' "${detail:0:240}"
     fi
 }
 
-run_hyprland_runtime_validation() {
-    local app=$1 path=$2 detail status
+probe_hyprland_runtime_validation() {
+    local detail status
+    [[ $HYPRLAND_RUNTIME_PROBED -eq 0 ]] || return 0
+    HYPRLAND_RUNTIME_PROBED=1
     if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
-        printf 'RUNTIME UNVERIFIED %s %s: requires an Arch Hyprland session\n' "$app" "$path"
-        return 0
+        HYPRLAND_RUNTIME_STATUS=125
+        HYPRLAND_RUNTIME_DETAIL='requires an Arch Hyprland session'
+        return
     fi
     if ! command -v hyprctl >/dev/null 2>&1; then
-        printf 'RUNTIME UNVERIFIED %s %s: hyprctl is unavailable\n' "$app" "$path"
-        return 0
+        HYPRLAND_RUNTIME_STATUS=125
+        HYPRLAND_RUNTIME_DETAIL='hyprctl is unavailable'
+        return
     fi
     detail=$(hyprctl configerrors 2>&1)
     status=$?
-    if [[ $status -eq 0 ]]; then
+    if [[ $status -eq 0 && -z "$detail" ]]; then
+        HYPRLAND_RUNTIME_STATUS=0
+        HYPRLAND_RUNTIME_DETAIL='Hyprland runtime validation passed'
+    else
+        HYPRLAND_RUNTIME_STATUS=1
+        HYPRLAND_RUNTIME_DETAIL=$(validation_detail "$detail" "$status")
+    fi
+}
+
+run_hyprland_runtime_validation() {
+    local app=$1 path=$2
+    probe_hyprland_runtime_validation
+    case "$HYPRLAND_RUNTIME_STATUS" in
+        0)
         printf 'PASS %s %s: Hyprland runtime validation passed\n' "$app" "$path"
         return 0
-    fi
-    printf 'BLOCKED %s %s: %s\n' "$app" "$path" "$(validation_detail "$detail" "$status")"
-    return 1
+            ;;
+        125)
+            printf 'RUNTIME UNVERIFIED %s %s: %s\n' "$app" "$path" "$HYPRLAND_RUNTIME_DETAIL"
+            return 0
+            ;;
+        *)
+            printf 'BLOCKED %s %s: %s\n' "$app" "$path" "$HYPRLAND_RUNTIME_DETAIL"
+            return 1
+            ;;
+    esac
 }
 
 command_diff() {
@@ -1321,6 +1352,9 @@ command_check() {
     validation_target "$@"
     detect_host >/dev/null
     host=$HOST_PLATFORM
+    HYPRLAND_RUNTIME_PROBED=0
+    HYPRLAND_RUNTIME_STATUS=125
+    HYPRLAND_RUNTIME_DETAIL=''
     parse_manifest "$MANIFEST"
 
     for ((i=0; i<${#MF_PATH[@]}; i++)); do
