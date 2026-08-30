@@ -146,6 +146,47 @@ native checks, inspect `hyprctl configerrors`, and test the preserved behavior
 before replacing any `unverified` value. Static macOS evidence must never be
 promoted to an Arch runtime pass.
 
+## Real Arch/Hyprland handoff
+
+`BLOCKED: real Arch/Hyprland runtime required`. Retain `RUNTIME UNVERIFIED`
+until an operator completes this gate in a real Hyprland session. First run the
+read-only preview and native checks; do not reload Hyprland:
+
+```bash
+./bin/dotfiles detect
+./bin/dotfiles check --target arch
+./bin/dotfiles diff
+./bin/dotfiles install
+hyprctl configerrors
+fuzzel --check-config --config="$PWD/home/.config/fuzzel/fuzzel.ini"
+zellij --config "$PWD/home/.config/zellij/config.kdl" setup --check
+```
+
+Capture the observed versions, without replacing any `unverified` matrix value
+that was not observed:
+
+```bash
+hyprctl version
+hyprpaper --version
+hypridle --version
+hyprlock --version
+hyprsunset --version
+waybar --version
+fuzzel --version
+mako --version
+uwsm --version
+```
+
+Only after the preview is accepted, run
+`./bin/dotfiles install --apply --backup`; confirm it creates one recoverable
+backup set and performs no service or compositor action. Then confirm there are
+no new `hyprctl configerrors` and manually verify the existing app, clipboard,
+group, media, mouse, tiling, workspace, resize, and lock bindings; Waybar and
+its power menu; wallpaper, idle/DPMS/suspend, lock screen, blue-light,
+clipboard-history, launcher, portal, and notification behavior; Zellij
+`Alt 1..0`, `Alt d/u`, and clipboard; and Kitty theme/font/pager/search plus the
+Fish auto-start workflow.
+
 ## macOS adoption gate — 2026-08-31
 
 This gate ran from the disposable
