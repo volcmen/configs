@@ -145,3 +145,30 @@ On the real Arch host, record the installed versions in the matrix, run the
 native checks, inspect `hyprctl configerrors`, and test the preserved behavior
 before replacing any `unverified` value. Static macOS evidence must never be
 promoted to an Arch runtime pass.
+
+## macOS adoption gate — 2026-08-31
+
+This gate ran from the disposable
+`cross-platform-dotfiles-modernization` worktree and was deliberately
+read-only. `bash tests/dotfiles-test.sh` exited 0 (`81 passed; 0 failed`),
+`dotfiles detect` exited 0 and reported `macos`, and
+`dotfiles check --target macos` exited 0 with 12 `PASS` and five
+`RUNTIME UNVERIFIED` results. The unverified validators are Kitty (two files),
+mpv, and Yazi (two files).
+
+The live-state read-only preview was intentionally not treated as adoption:
+`dotfiles diff` exited 1 with six `MATCH`, three `DRIFT`, and eight `MISSING`
+entries; `dotfiles install` exited 1 with eight `CREATE` and nine `CONFLICT`
+entries. All 17 selected preview rows were macOS rows. The required
+Linux-only-target filter (`hypr`, `waybar`, `fuzzel`, `mako`, `uwsm`,
+`chromium-flags`, and `electron-flags`) returned zero rows (`rg` exit 1 for no
+matches); the install side of that pipeline retained its expected conflict exit
+1.
+
+No `install --apply` command was run and this gate created no backup set. An
+apply from this checkout would create canonical absolute symlinks pointing into
+an ephemeral worktree, so live macOS adoption, backup creation, idempotence,
+and startup behavior are deferred until the reviewed branch is integrated into
+the persistent `/Users/david.david/Personal/github/configs` main checkout.
+Fish selection, Zellij and Starship validation against the live adopted links,
+and the required new Kitty window remain `RUNTIME UNVERIFIED`.
