@@ -1427,6 +1427,18 @@ STUB
     [[ "$status" -eq 127 ]] || fail "missing-backend status $status != 127"
 }
 
+test_shared_terminal_behavior_is_canonical() {
+    local kitty="$PROJECT_ROOT/home/.config/kitty/kitty.conf"
+    local zellij="$PROJECT_ROOT/home/.config/zellij/config.kdl"
+    grep -Fq 'font_size 13.0' "$kitty" || return 1
+    grep -Fq 'scrollback_pager ${HOME}/.config/kitty/pager.sh' "$kitty" || return 1
+    grep -Fq 'map ctrl+shift+u no_op' "$kitty" || return 1
+    grep -Fq 'shell_integration enabled' "$kitty" || return 1
+    grep -Fq 'bind "Alt 0" { GoToTab 10; }' "$zellij" || return 1
+    grep -Fq 'bind "Alt d" { HalfPageScrollDown; }' "$zellij" || return 1
+    grep -Fq 'copy_command "dotfiles-copy"' "$zellij" || return 1
+}
+
 run_test test_help
 run_test test_unknown_command_fails
 run_test test_detects_macos_and_ignores_target
@@ -1502,5 +1514,6 @@ run_test test_install_rechecks_source_after_parent_preparation
 run_test test_install_does_not_follow_parent_swapped_before_mkdir
 run_test test_install_rejects_home_swapped_before_pinning
 run_test test_dotfiles_copy_dispatches_portably
+run_test test_shared_terminal_behavior_is_canonical
 printf '%s passed; %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 [[ "$FAIL_COUNT" -eq 0 ]]
