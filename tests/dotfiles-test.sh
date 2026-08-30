@@ -7,6 +7,7 @@ PASS_COUNT=0
 FAIL_COUNT=0
 CLI_STATUS=0
 CLI_OUTPUT=""
+SELECTED_TESTS=("$@")
 
 cleanup() {
     if [[ -n "$TEST_TMP" && -d "$TEST_TMP" ]]; then
@@ -34,8 +35,10 @@ run_cli() {
     local test_os_release="${DOTFILES_TEST_OS_RELEASE:-$TEST_TMP/os-release}"
     if CLI_OUTPUT="$(DOTFILES_TESTING=1 \
         DOTFILES_TEST_HOME="$TEST_TMP/home" \
+        DOTFILES_TEST_STATE="${DOTFILES_TEST_STATE:-$TEST_TMP/state}" \
         DOTFILES_TEST_UNAME="$test_uname" \
         DOTFILES_TEST_OS_RELEASE="$test_os_release" \
+        DOTFILES_TEST_FAIL_AFTER="${DOTFILES_TEST_FAIL_AFTER:-}" \
         DOTFILES_TEST_INSTALL_HOOK="${DOTFILES_TEST_INSTALL_HOOK:-}" \
         PATH="${DOTFILES_TEST_PATH:-$PATH}" \
         "$TEST_TMP/repo/bin/dotfiles" "$@" 2>&1)"; then
@@ -67,7 +70,14 @@ run_detect() {
 }
 
 run_test() {
-    local name=$1
+    local name=$1 selected selected_name
+    if [[ ${#SELECTED_TESTS[@]} -gt 0 ]]; then
+        selected=0
+        for selected_name in "${SELECTED_TESTS[@]}"; do
+            [[ "$selected_name" == "$name" ]] && selected=1
+        done
+        [[ $selected -eq 1 ]] || return 0
+    fi
     if "$name"; then
         PASS_COUNT=$((PASS_COUNT + 1))
         printf 'ok - %s\n' "$name"
@@ -372,15 +382,139 @@ test_install_rejects_backup_without_apply_and_unknown_options() {
     assert_status 0 && [[ -L "$TEST_TMP/home/.config/demo/config" ]]
 }
 
-test_install_backup_does_not_replace_conflicts() {
+test_install_backup_preserves_regular_file_relative_path() {
+    local backup
     new_fixture
     mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
     printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
     printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
     write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+
+    run_cli install
+    assert_status 1 && assert_contains 'CONFLICT demo .config/demo/config' || return 1
+    run_cli install --apply
+    assert_status 1 && assert_contains 'CONFLICT demo .config/demo/config' || return 1
     run_cli install --apply --backup
-    [[ "$CLI_STATUS" -ne 0 ]] || { fail 'backup install unexpectedly replaced a conflict'; return 1; }
-    [[ "$(<"$TEST_TMP/home/.config/demo/config")" == existing ]]
+    assert_status 0 && assert_contains 'BACKUP demo .config/demo/config' || return 1
+    [[ -L "$TEST_TMP/home/.config/demo/config" ]] || return 1
+    backup="$(find "$TEST_TMP/state/backups" -path '*/.config/demo/config' -type f -print)"
+    [[ -n "$backup" && "$(<"$backup")" == existing ]]
+}
+
+test_install_backup_preserves_foreign_symlink() {
+    local backup
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'foreign\n' >"$TEST_TMP/home/.config/demo/foreign"
+    ln -s "$TEST_TMP/home/.config/demo/foreign" "$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+
+    run_cli install --apply --backup
+    assert_status 0 && assert_contains 'BACKUP demo .config/demo/config' || return 1
+    [[ "$(readlink "$TEST_TMP/home/.config/demo/config")" == "$TEST_TMP/repo/home/.config/demo/config" ]] || return 1
+    backup="$(find "$TEST_TMP/state/backups" -path '*/.config/demo/config' -type l -print)"
+    [[ -n "$backup" && "$(readlink "$backup")" == "$TEST_TMP/home/.config/demo/foreign" ]]
+}
+
+test_install_backup_blocks_directory_conflict() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo/config"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+
+    run_cli install --apply --backup
+    assert_status 65 && assert_contains 'BLOCKED demo .config/demo/config' || return 1
+    [[ -d "$TEST_TMP/home/.config/demo/config" && ! -L "$TEST_TMP/home/.config/demo/config" ]] || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock"
+}
+
+test_install_existing_lock_refuses_mutation() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/state/install.lock"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+
+    run_cli install --apply
+    assert_status 75 && assert_contains 'another install is active' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/config"
+}
+
+test_install_releases_lock_after_success_and_failure() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+
+    run_cli install --apply
+    assert_status 0 || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock" || return 1
+
+    rm "$TEST_TMP/home/.config/demo/config"
+    DOTFILES_TEST_FAIL_AFTER=1 run_cli install --apply
+    assert_status 70 || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock" || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/config"
+}
+
+test_install_backup_report_records_move_and_link_rows() {
+    local report expected_move expected_link
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+
+    run_cli install --apply --backup
+    assert_status 0 || return 1
+    report="$(find "$TEST_TMP/state/backups" -name report.tsv -type f -print)"
+    [[ -n "$report" ]] || return 1
+    expected_move=$'MOVE\t.config/demo/config\t'"$TEST_TMP/home/.config/demo/config"$'\t'"${report%/report.tsv}/.config/demo/config"
+    expected_link=$'LINK\t.config/demo/config\t'"$TEST_TMP/repo/home/.config/demo/config"$'\t'"$TEST_TMP/home/.config/demo/config"
+    grep -Fqx "$expected_move" "$report" || return 1
+    grep -Fqx "$expected_link" "$report"
+}
+
+test_install_injected_failure_rolls_back_partial_work() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'new-a\n' >"$TEST_TMP/repo/home/.config/demo/a"
+    printf 'new-b\n' >"$TEST_TMP/repo/home/.config/demo/b"
+    printf 'old-a\n' >"$TEST_TMP/home/.config/demo/a"
+    printf 'old-b\n' >"$TEST_TMP/home/.config/demo/b"
+    write_manifest $'demo|macos|file|.config/demo/a|plain|yes|1\ndemo|macos|file|.config/demo/b|plain|yes|1'
+
+    DOTFILES_TEST_FAIL_AFTER=3 run_cli install --apply --backup
+    assert_status 70 || return 1
+    [[ ! -L "$TEST_TMP/home/.config/demo/a" && ! -L "$TEST_TMP/home/.config/demo/b" ]] || return 1
+    [[ "$(<"$TEST_TMP/home/.config/demo/a")" == old-a ]] || return 1
+    [[ "$(<"$TEST_TMP/home/.config/demo/b")" == old-b ]] || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock"
+}
+
+test_install_rollback_refuses_unrelated_replacement() {
+    local hook backup
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/replace-before-rollback"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = before_rollback ]; then
+    /bin/rm -- "$TEST_TMP/home/.config/demo/config"
+    printf 'unrelated\n' >"$TEST_TMP/home/.config/demo/config"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" DOTFILES_TEST_FAIL_AFTER=2 run_cli install --apply --backup
+    assert_status 70 && assert_contains 'ROLLBACK_REFUSED .config/demo/config' || return 1
+    [[ ! -L "$TEST_TMP/home/.config/demo/config" && "$(<"$TEST_TMP/home/.config/demo/config")" == unrelated ]] || return 1
+    backup="$(find "$TEST_TMP/state/backups" -path '*/.config/demo/config' -type f -print)"
+    [[ -n "$backup" && "$(<"$backup")" == existing ]] || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock"
 }
 
 test_install_blocks_symlinked_parent() {
@@ -523,7 +657,14 @@ run_test test_install_conflict_aborts_complete_plan
 run_test test_install_refuses_non_directory_parent
 run_test test_install_selects_only_physical_platform
 run_test test_install_rejects_backup_without_apply_and_unknown_options
-run_test test_install_backup_does_not_replace_conflicts
+run_test test_install_backup_preserves_regular_file_relative_path
+run_test test_install_backup_preserves_foreign_symlink
+run_test test_install_backup_blocks_directory_conflict
+run_test test_install_existing_lock_refuses_mutation
+run_test test_install_releases_lock_after_success_and_failure
+run_test test_install_backup_report_records_move_and_link_rows
+run_test test_install_injected_failure_rolls_back_partial_work
+run_test test_install_rollback_refuses_unrelated_replacement
 run_test test_install_blocks_symlinked_parent
 run_test test_install_rechecks_source_after_parent_preparation
 run_test test_install_does_not_follow_parent_swapped_before_mkdir

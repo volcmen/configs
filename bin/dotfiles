@@ -16,6 +16,13 @@ MANIFEST="$REPO_ROOT/dotfiles.manifest"
 MF_APP=(); MF_PLATFORMS=(); MF_KIND=(); MF_PATH=()
 MF_VALIDATOR=(); MF_REQUIRED=(); MF_TESTED=()
 PLAN_ACTION=(); PLAN_APP=(); PLAN_PATH=(); PLAN_SOURCE=(); PLAN_TARGET=()
+PLAN_NEEDS_BACKUP=0
+
+STATE_ROOT=''; LOCK_PATH=''; LOCK_HELD=0
+BACKUP_ROOT=''; REPORT_PATH=''
+JOURNAL_TYPE=(); JOURNAL_RELATIVE=(); JOURNAL_FIRST=(); JOURNAL_SECOND=(); JOURNAL_IDENTITY=()
+JOURNAL_COUNT=0; MUTATION_COUNT=0; TEST_FAIL_AFTER=''
+TRANSACTION_ACTIVE=0
 
 usage() {
     cat <<'USAGE'
@@ -339,7 +346,7 @@ command_diff() {
 }
 
 build_install_plan() {
-    local host source target_path status action i
+    local allow_backup=${1:-0} host source target_path status action i
     local conflict=0 blocked=0
 
     detect_host >/dev/null
@@ -349,6 +356,7 @@ build_install_plan() {
     [[ -n "$EFFECTIVE_HOME" ]] || die 65 'effective home is empty'
     parse_manifest "$MANIFEST"
     PLAN_ACTION=(); PLAN_APP=(); PLAN_PATH=(); PLAN_SOURCE=(); PLAN_TARGET=()
+    PLAN_NEEDS_BACKUP=0
 
     for ((i=0; i<${#MF_PATH[@]}; i++)); do
         platform_selected "${MF_PLATFORMS[$i]}" "$host" || continue
@@ -364,7 +372,25 @@ build_install_plan() {
             MISSING) action=CREATE ;;
             LINKED) action=NOOP ;;
             BLOCKED) action=BLOCKED; blocked=1 ;;
-            *) action=CONFLICT; conflict=1 ;;
+            TYPE_CONFLICT)
+                if [[ "$allow_backup" == 1 ]]; then
+                    action=BLOCKED
+                    blocked=1
+                else
+                    action=CONFLICT
+                    conflict=1
+                fi
+                ;;
+            DRIFT|MATCH|FOREIGN_LINK)
+                if [[ "$allow_backup" == 1 ]]; then
+                    action=BACKUP
+                    PLAN_NEEDS_BACKUP=1
+                else
+                    action=CONFLICT
+                    conflict=1
+                fi
+                ;;
+            *) action=BLOCKED; blocked=1 ;;
         esac
         PLAN_ACTION[${#PLAN_ACTION[@]}]=$action
         PLAN_APP[${#PLAN_APP[@]}]=${MF_APP[$i]}
@@ -380,6 +406,106 @@ build_install_plan() {
         return 65
     elif [[ $conflict -ne 0 ]]; then
         return 1
+    fi
+}
+
+state_root() {
+    if [[ ${DOTFILES_TESTING:-0} == 1 && -n ${DOTFILES_TEST_STATE:-} ]]; then
+        printf '%s\n' "$DOTFILES_TEST_STATE"
+        return
+    fi
+    [[ -n ${HOME:-} ]] || return 65
+    printf '%s/dotfiles\n' "${XDG_STATE_HOME:-$HOME/.local/state}"
+}
+
+acquire_lock() {
+    STATE_ROOT=$(state_root) || return $?
+    mkdir -p -- "$STATE_ROOT" || return 74
+    [[ -d "$STATE_ROOT" && ! -L "$STATE_ROOT" ]] || return 74
+    LOCK_PATH="$STATE_ROOT/install.lock"
+    if ! mkdir -- "$LOCK_PATH" 2>/dev/null; then
+        printf '%s: another install is active: %s\n' "$PROGRAM" "$LOCK_PATH" >&2
+        return 75
+    fi
+    LOCK_HELD=1
+}
+
+release_lock() {
+    [[ "$LOCK_HELD" == 1 ]] || return 0
+    if rmdir -- "$LOCK_PATH"; then
+        LOCK_HELD=0
+        return 0
+    fi
+    printf '%s: failed to release install lock: %s\n' "$PROGRAM" "$LOCK_PATH" >&2
+    return 74
+}
+
+begin_backup() {
+    local backup_parent timestamp
+    backup_parent="$STATE_ROOT/backups"
+    mkdir -p -- "$backup_parent" || return 74
+    [[ -d "$backup_parent" && ! -L "$backup_parent" ]] || return 74
+    timestamp=$(date -u +%Y%m%dT%H%M%SZ) || return 74
+    BACKUP_ROOT="$backup_parent/$timestamp-$$"
+    mkdir -- "$BACKUP_ROOT" || return 74
+    REPORT_PATH="$BACKUP_ROOT/report.tsv"
+    : >"$REPORT_PATH" || return 74
+}
+
+reset_transaction_journal() {
+    JOURNAL_TYPE=(); JOURNAL_RELATIVE=(); JOURNAL_FIRST=(); JOURNAL_SECOND=(); JOURNAL_IDENTITY=()
+    JOURNAL_COUNT=0
+    MUTATION_COUNT=0
+    TEST_FAIL_AFTER=''
+    if [[ ${DOTFILES_TESTING:-0} == 1 ]]; then
+        TEST_FAIL_AFTER=${DOTFILES_TEST_FAIL_AFTER:-}
+        case "$TEST_FAIL_AFTER" in
+            '') ;;
+            0|*[!0-9]*) return 64 ;;
+        esac
+    fi
+}
+
+append_report() {
+    [[ -n "$REPORT_PATH" ]] || return 0
+    printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >>"$REPORT_PATH"
+}
+
+path_identity() {
+    local identity ignored
+    IFS=' ' read -r identity ignored <<<"$(LC_ALL=C ls -di -- "$1")" || return 1
+    [[ -n "$identity" ]] || return 1
+    printf '%s\n' "$identity"
+}
+
+journal_move() {
+    local relative_path=$1 target_path=$2 backup_path=$3 i=$JOURNAL_COUNT
+    JOURNAL_TYPE[$i]=MOVE
+    JOURNAL_RELATIVE[$i]=$relative_path
+    JOURNAL_FIRST[$i]=$target_path
+    JOURNAL_SECOND[$i]=$backup_path
+    JOURNAL_IDENTITY[$i]=''
+    JOURNAL_COUNT=$((JOURNAL_COUNT + 1))
+    append_report MOVE "$relative_path" "$target_path" "$backup_path"
+}
+
+journal_link() {
+    local relative_path=$1 source=$2 target_path=$3 identity i=$JOURNAL_COUNT
+    identity=$(path_identity "$target_path") || identity=''
+    JOURNAL_TYPE[$i]=LINK
+    JOURNAL_RELATIVE[$i]=$relative_path
+    JOURNAL_FIRST[$i]=$source
+    JOURNAL_SECOND[$i]=$target_path
+    JOURNAL_IDENTITY[$i]=$identity
+    JOURNAL_COUNT=$((JOURNAL_COUNT + 1))
+    append_report LINK "$relative_path" "$source" "$target_path"
+}
+
+after_transaction_mutation() {
+    MUTATION_COUNT=$((MUTATION_COUNT + 1))
+    if [[ ${DOTFILES_TESTING:-0} == 1 && -n "$TEST_FAIL_AFTER" && "$MUTATION_COUNT" -eq "$TEST_FAIL_AFTER" ]]; then
+        printf '%s: injected transaction failure after mutation %s\n' "$PROGRAM" "$MUTATION_COUNT" >&2
+        return 70
     fi
 }
 
@@ -412,32 +538,186 @@ prepare_install_parent() {
     done
 }
 
-apply_install_entry() (
-    local source=$1 target_path=$2 relative_path=$3 target_name expected_root
+pin_existing_install_parent() {
+    local relative_path=$1 expected_root=$2 component physical parent_physical i
+    local components=()
+
+    [[ ! -L "$EFFECTIVE_HOME" && -d "$EFFECTIVE_HOME" ]] || return 1
+    cd -P -- "$EFFECTIVE_HOME" || return 1
+    physical=$(pwd -P) || return 1
+    [[ "$physical" == "$expected_root" ]] || return 1
+    TARGET_ROOT_PHYSICAL=$expected_root
+
+    IFS=/ read -r -a components <<<"$relative_path"
+    for ((i=0; i<${#components[@]}-1; i++)); do
+        component=${components[$i]}
+        [[ -d "$component" && ! -L "$component" ]] || return 1
+        parent_physical=$(pwd -P) || return 1
+        cd -P -- "$component" || return 1
+        physical=$(pwd -P) || return 1
+        [[ "$physical" == "$parent_physical/$component" ]] || return 1
+        path_within "$physical" "$TARGET_ROOT_PHYSICAL" || return 1
+    done
+}
+
+apply_install_entry() {
+    local action=$1 source=$2 target_path=$3 relative_path=$4
+    local target_name expected_root backup_path='' observed original_dir status=0
+
+    original_dir=$(pwd -P) || return 65
+    TARGET_RELATIVE_PATH=$relative_path
+    safe_source "$source" || status=65
+    if [[ $status -eq 0 && "$action" == BACKUP ]]; then
+        backup_path="$BACKUP_ROOT/$relative_path"
+        [[ ! -e "$backup_path" && ! -L "$backup_path" ]] || status=74
+        [[ $status -ne 0 ]] || mkdir -p -- "$(dirname "$backup_path")" || status=74
+    fi
+    if [[ $status -eq 0 ]]; then
+        TARGET_ROOT_PHYSICAL=''
+        safe_target "$target_path" || status=65
+    fi
+    if [[ $status -eq 0 ]]; then
+        expected_root=$TARGET_ROOT_PHYSICAL
+        [[ -n "$expected_root" ]] || status=65
+    fi
+    if [[ $status -eq 0 ]]; then
+        prepare_install_parent "$relative_path" "$expected_root" || status=65
+    fi
+    if [[ $status -eq 0 ]]; then
+        safe_target "$target_path" || status=65
+    fi
+    if [[ $status -eq 0 ]]; then
+        observed=$(artifact_status "$source" "$target_path")
+        case "$action:$observed" in
+            CREATE:MISSING|BACKUP:DRIFT|BACKUP:MATCH|BACKUP:FOREIGN_LINK) ;;
+            *) status=65 ;;
+        esac
+    fi
+    target_name=${relative_path##*/}
+    if [[ $status -eq 0 && "$action" == BACKUP ]]; then
+        mv -- "$target_name" "$backup_path" || status=74
+        if [[ $status -eq 0 ]]; then
+            journal_move "$relative_path" "$target_path" "$backup_path" || status=74
+        fi
+        if [[ $status -eq 0 ]]; then
+            after_transaction_mutation || status=$?
+        fi
+    fi
+    if [[ $status -eq 0 ]]; then
+        [[ ! -e "$target_name" && ! -L "$target_name" ]] || status=65
+        safe_source "$source" || status=65
+    fi
+    if [[ $status -eq 0 ]]; then
+        ln -s -- "$source" "$target_name" || status=74
+        if [[ $status -eq 0 ]]; then
+            journal_link "$relative_path" "$source" "$target_path" || status=74
+        fi
+        if [[ $status -eq 0 ]]; then
+            after_transaction_mutation || status=$?
+        fi
+    fi
+    cd -P -- "$original_dir" || { [[ $status -ne 0 ]] || status=65; }
+    return "$status"
+}
+
+rollback_link_entry() (
+    local relative_path=$1 source=$2 target_path=$3 identity=$4
+    local expected_root target_name current_identity
 
     TARGET_RELATIVE_PATH=$relative_path
-    safe_source "$source" || return 65
     TARGET_ROOT_PHYSICAL=''
-    safe_target "$target_path" || return 65
+    safe_target "$target_path" || return 2
     expected_root=$TARGET_ROOT_PHYSICAL
-    [[ -n "$expected_root" ]] || return 65
-    prepare_install_parent "$relative_path" "$expected_root" || return 65
-    safe_target "$target_path" || return 65
+    [[ -n "$expected_root" ]] || return 2
+    pin_existing_install_parent "$relative_path" "$expected_root" || return 2
     target_name=${relative_path##*/}
-    [[ ! -e "$target_name" && ! -L "$target_name" ]] || return 65
-    safe_source "$source" || return 65
-    ln -s -- "$source" "$target_name"
+    [[ -L "$target_name" && "$(readlink "$target_name")" == "$source" ]] || return 2
+    current_identity=$(path_identity "$target_name") || return 2
+    [[ -n "$identity" && "$current_identity" == "$identity" ]] || return 2
+    rm -- "$target_name"
 )
 
+rollback_move_entry() (
+    local relative_path=$1 target_path=$2 backup_path=$3
+    local expected_root target_name
+
+    [[ -e "$backup_path" || -L "$backup_path" ]] || return 2
+    TARGET_RELATIVE_PATH=$relative_path
+    TARGET_ROOT_PHYSICAL=''
+    safe_target "$target_path" || return 2
+    expected_root=$TARGET_ROOT_PHYSICAL
+    [[ -n "$expected_root" ]] || return 2
+    pin_existing_install_parent "$relative_path" "$expected_root" || return 2
+    target_name=${relative_path##*/}
+    [[ ! -e "$target_name" && ! -L "$target_name" ]] || return 2
+    mv -- "$backup_path" "$target_name"
+)
+
+rollback_transaction() {
+    local i status=0 entry_status relative_path
+    for ((i=JOURNAL_COUNT-1; i>=0; i--)); do
+        relative_path=${JOURNAL_RELATIVE[$i]}
+        case "${JOURNAL_TYPE[$i]}" in
+            LINK)
+                rollback_link_entry "$relative_path" "${JOURNAL_FIRST[$i]}" "${JOURNAL_SECOND[$i]}" "${JOURNAL_IDENTITY[$i]}"
+                entry_status=$?
+                ;;
+            MOVE)
+                rollback_move_entry "$relative_path" "${JOURNAL_FIRST[$i]}" "${JOURNAL_SECOND[$i]}"
+                entry_status=$?
+                ;;
+            *) entry_status=2 ;;
+        esac
+        if [[ $entry_status -eq 2 ]]; then
+            printf '%s: ROLLBACK_REFUSED %s; target or backup no longer matches this transaction\n' "$PROGRAM" "$relative_path" >&2
+            status=1
+        elif [[ $entry_status -ne 0 ]]; then
+            printf '%s: rollback failed for %s\n' "$PROGRAM" "$relative_path" >&2
+            status=1
+        fi
+    done
+    return "$status"
+}
+
+transaction_trap() {
+    local status=$?
+    trap - EXIT INT TERM
+    if [[ "$TRANSACTION_ACTIVE" == 1 && "$status" -ne 0 ]]; then
+        install_test_hook before_rollback "$EFFECTIVE_HOME" || true
+        rollback_transaction || true
+    fi
+    TRANSACTION_ACTIVE=0
+    release_lock || true
+    exit "$status"
+}
+
+start_transaction() {
+    reset_transaction_journal || return $?
+    acquire_lock || return $?
+    TRANSACTION_ACTIVE=1
+    trap transaction_trap EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+}
+
+finish_transaction() {
+    local status=0
+    TRANSACTION_ACTIVE=0
+    release_lock || status=$?
+    trap - EXIT INT TERM
+    return "$status"
+}
+
 apply_install_plan() {
-    local source target_path relative_path i
+    local action source target_path relative_path i
 
     for ((i=0; i<${#PLAN_ACTION[@]}; i++)); do
-        [[ "${PLAN_ACTION[$i]}" == CREATE ]] || continue
+        action=${PLAN_ACTION[$i]}
+        [[ "$action" == CREATE || "$action" == BACKUP ]] || continue
         source=${PLAN_SOURCE[$i]}
         target_path=${PLAN_TARGET[$i]}
         relative_path=${PLAN_PATH[$i]}
-        apply_install_entry "$source" "$target_path" "$relative_path" || return 65
+        apply_install_entry "$action" "$source" "$target_path" "$relative_path" || return $?
     done
 }
 
@@ -459,9 +739,14 @@ command_install() {
         esac
         shift
     done
-    build_install_plan || return $?
+    build_install_plan "$backup" || return $?
     [[ $apply -eq 1 ]] || return 0
-    apply_install_plan
+    start_transaction || return $?
+    if [[ "$PLAN_NEEDS_BACKUP" == 1 ]]; then
+        begin_backup || return $?
+    fi
+    apply_install_plan || return $?
+    finish_transaction
 }
 
 check() {
