@@ -7,6 +7,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 MANIFEST="$REPO_ROOT/dotfiles.manifest"
 SOURCE_ROOT="$REPO_ROOT/home"
 
+MF_APP=(); MF_PLATFORMS=(); MF_KIND=(); MF_PATH=()
+MF_VALIDATOR=(); MF_REQUIRED=(); MF_TESTED=()
+
 usage() {
     cat <<'USAGE'
 Usage: dotfiles <command> [options]
@@ -26,6 +29,57 @@ die() {
     shift
     printf '%s: %s\n' "$PROGRAM" "$*" >&2
     exit "$status"
+}
+
+manifest_error() { die 65 "manifest line $1: $2"; }
+
+valid_platforms() {
+    case "$1" in macos|arch|macos,arch|arch,macos) return 0 ;; *) return 1 ;; esac
+}
+
+valid_validator() {
+    case "$1" in
+        plain|shell|fish|fontconfig|git|hyprconf|hyprland-lua|ini|jsonc|kitty|lua|mako|mpv|python|starship|toml|uwsm-shell|xml|zellij|css) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+safe_relative_path() {
+    [[ -n "$1" && "$1" != /* && "$1" != *'|'* ]] || return 1
+    case "/$1/" in *'/../'*|*'/./'*|*'//'*) return 1 ;; esac
+    return 0
+}
+
+parse_manifest() {
+    local file=$1 line line_no=0 app platforms kind path validator required tested extra separators i
+    MF_APP=(); MF_PLATFORMS=(); MF_KIND=(); MF_PATH=()
+    MF_VALIDATOR=(); MF_REQUIRED=(); MF_TESTED=()
+    [[ -r "$file" ]] || die 65 "manifest is not readable: $file"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line_no=$((line_no + 1))
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        separators=${line//[!|]/}
+        [[ "$separators" == '||||||' ]] || manifest_error "$line_no" 'expected seven fields'
+        IFS='|' read -r app platforms kind path validator required tested extra <<<"$line"
+        [[ -n "$app" && "$app" =~ ^[a-z0-9][a-z0-9-]*$ ]] || manifest_error "$line_no" 'invalid app'
+        valid_platforms "$platforms" || manifest_error "$line_no" 'invalid platforms'
+        [[ "$kind" == file ]] || manifest_error "$line_no" 'schema v1 kind must be file'
+        safe_relative_path "$path" || manifest_error "$line_no" 'unsafe path'
+        valid_validator "$validator" || manifest_error "$line_no" 'unknown validator'
+        [[ "$required" == yes || "$required" == no ]] || manifest_error "$line_no" 'required must be yes or no'
+        [[ -n "$tested" ]] || manifest_error "$line_no" 'tested_version is empty'
+        for ((i=0; i<${#MF_PATH[@]}; i++)); do
+            [[ "${MF_PATH[$i]}" != "$path" ]] || manifest_error "$line_no" "duplicate path: $path"
+        done
+        i=${#MF_APP[@]}
+        MF_APP[$i]=$app; MF_PLATFORMS[$i]=$platforms; MF_KIND[$i]=$kind
+        MF_PATH[$i]=$path; MF_VALIDATOR[$i]=$validator
+        MF_REQUIRED[$i]=$required; MF_TESTED[$i]=$tested
+    done <"$file"
+}
+
+platform_selected() {
+    case ",$1," in *,"$2",*) return 0 ;; *) return 1 ;; esac
 }
 
 test_value() {
@@ -77,13 +131,18 @@ detect_host() {
     esac
 }
 
+check() {
+    parse_manifest "$MANIFEST"
+}
+
 main() {
     local command=${1:-help}
     [[ $# -eq 0 ]] || shift
     case "$command" in
         help|-h|--help) usage ;;
         detect) detect_host ;;
-        check|diff|install) die 69 "$command is not implemented" ;;
+        check) check "$@" ;;
+        diff|install) die 69 "$command is not implemented" ;;
         *) die 64 "unknown command: $command" ;;
     esac
 }

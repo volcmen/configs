@@ -1,0 +1,11 @@
+#!/bin/sh
+set -u
+
+if command -v pbcopy >/dev/null 2>&1; then
+    exec pbcopy
+fi
+if command -v wl-copy >/dev/null 2>&1; then
+    exec wl-copy
+fi
+printf 'dotfiles-copy: neither pbcopy nor wl-copy is available\n' >&2
+exit 127
