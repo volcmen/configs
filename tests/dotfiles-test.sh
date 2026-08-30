@@ -36,6 +36,7 @@ run_cli() {
         DOTFILES_TEST_HOME="$TEST_TMP/home" \
         DOTFILES_TEST_UNAME="$test_uname" \
         DOTFILES_TEST_OS_RELEASE="$test_os_release" \
+        PATH="${DOTFILES_TEST_PATH:-$PATH}" \
         "$TEST_TMP/repo/bin/dotfiles" "$@" 2>&1)"; then
         CLI_STATUS=0
     else
@@ -392,6 +393,53 @@ test_install_blocks_symlinked_parent() {
         assert_not_exists "$TEST_TMP/outside/demo/config"
 }
 
+test_install_rechecks_source_after_parent_preparation() {
+    local hook_dir
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/outside"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'outside\n' >"$TEST_TMP/outside/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook_dir="$TEST_TMP/mkdir-hook"
+    mkdir "$hook_dir"
+    cat >"$hook_dir/mkdir" <<STUB
+#!/bin/sh
+if [ ! -e "$TEST_TMP/mkdir-hook-ran" ]; then
+    : >"$TEST_TMP/mkdir-hook-ran"
+    /bin/rm -rf -- "$TEST_TMP/repo/home/.config/demo"
+    /bin/ln -s "$TEST_TMP/outside" "$TEST_TMP/repo/home/.config/demo"
+fi
+exec /bin/mkdir "\$@"
+STUB
+    chmod +x "$hook_dir/mkdir"
+    DOTFILES_TEST_PATH="$hook_dir:$PATH" run_cli install --apply
+    [[ "$CLI_STATUS" -ne 0 ]] || { fail 'install linked a source changed during parent preparation'; return 1; }
+    assert_not_exists "$TEST_TMP/home/.config/demo/config"
+}
+
+test_install_does_not_follow_parent_swapped_before_mkdir() {
+    local hook_dir
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/outside"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook_dir="$TEST_TMP/mkdir-hook"
+    mkdir "$hook_dir"
+    cat >"$hook_dir/mkdir" <<STUB
+#!/bin/sh
+if [ ! -e "$TEST_TMP/mkdir-hook-ran" ]; then
+    : >"$TEST_TMP/mkdir-hook-ran"
+    /bin/mv "$TEST_TMP/home" "$TEST_TMP/original-home"
+    /bin/ln -s "$TEST_TMP/outside" "$TEST_TMP/home"
+fi
+exec /bin/mkdir "\$@"
+STUB
+    chmod +x "$hook_dir/mkdir"
+    DOTFILES_TEST_PATH="$hook_dir:$PATH" run_cli install --apply
+    [[ "$CLI_STATUS" -ne 0 ]] || { fail 'install accepted a swapped target ancestor'; return 1; }
+    assert_not_exists "$TEST_TMP/outside/.config"
+}
+
 test_dotfiles_copy_dispatches_portably() {
     local helper="$PROJECT_ROOT/home/.local/bin/dotfiles-copy"
     local stub_path empty_path output status
@@ -456,6 +504,8 @@ run_test test_install_selects_only_physical_platform
 run_test test_install_rejects_backup_without_apply_and_unknown_options
 run_test test_install_backup_does_not_replace_conflicts
 run_test test_install_blocks_symlinked_parent
+run_test test_install_rechecks_source_after_parent_preparation
+run_test test_install_does_not_follow_parent_swapped_before_mkdir
 run_test test_dotfiles_copy_dispatches_portably
 printf '%s passed; %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 [[ "$FAIL_COUNT" -eq 0 ]]

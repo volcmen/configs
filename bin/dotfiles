@@ -378,49 +378,54 @@ build_install_plan() {
 }
 
 prepare_install_parent() {
-    local relative_path=$1 current component physical i
+    local relative_path=$1 component physical parent_physical i
     local components=()
 
-    current=$EFFECTIVE_HOME
-    [[ ! -L "$current" ]] || return 1
-    if [[ -e "$current" ]]; then
-        [[ -d "$current" ]] || return 1
-    else
-        mkdir -- "$current" || return 1
-    fi
-    [[ -d "$current" && ! -L "$current" ]] || return 1
-    TARGET_ROOT_PHYSICAL=$(physical_dir "$current") || return 1
+    [[ ! -L "$EFFECTIVE_HOME" && -d "$EFFECTIVE_HOME" ]] || return 1
+    cd -P -- "$EFFECTIVE_HOME" || return 1
+    TARGET_ROOT_PHYSICAL=$(pwd -P) || return 1
 
     IFS=/ read -r -a components <<<"$relative_path"
     for ((i=0; i<${#components[@]}-1; i++)); do
         component=${components[$i]}
-        current="$current/$component"
-        [[ ! -L "$current" ]] || return 1
-        if [[ -e "$current" ]]; then
-            [[ -d "$current" ]] || return 1
+        [[ ! -L "$component" ]] || return 1
+        if [[ -e "$component" ]]; then
+            [[ -d "$component" ]] || return 1
         else
-            mkdir -- "$current" || return 1
+            mkdir -- "$component" || return 1
         fi
-        [[ -d "$current" && ! -L "$current" ]] || return 1
-        physical=$(physical_dir "$current") || return 1
+        [[ -d "$component" && ! -L "$component" ]] || return 1
+        parent_physical=$(pwd -P) || return 1
+        cd -P -- "$component" || return 1
+        physical=$(pwd -P) || return 1
+        [[ "$physical" == "$parent_physical/$component" ]] || return 1
         path_within "$physical" "$TARGET_ROOT_PHYSICAL" || return 1
     done
 }
 
+apply_install_entry() (
+    local source=$1 target_path=$2 relative_path=$3 target_name
+
+    TARGET_RELATIVE_PATH=$relative_path
+    safe_source "$source" || return 65
+    safe_target "$target_path" || return 65
+    prepare_install_parent "$relative_path" || return 65
+    safe_target "$target_path" || return 65
+    target_name=${relative_path##*/}
+    [[ ! -e "$target_name" && ! -L "$target_name" ]] || return 65
+    safe_source "$source" || return 65
+    ln -s -- "$source" "$target_name"
+)
+
 apply_install_plan() {
-    local source target_path i
+    local source target_path relative_path i
 
     for ((i=0; i<${#PLAN_ACTION[@]}; i++)); do
         [[ "${PLAN_ACTION[$i]}" == CREATE ]] || continue
         source=${PLAN_SOURCE[$i]}
         target_path=${PLAN_TARGET[$i]}
-        TARGET_RELATIVE_PATH=${PLAN_PATH[$i]}
-        safe_source "$source" || return 65
-        safe_target "$target_path" || return 65
-        prepare_install_parent "$TARGET_RELATIVE_PATH" || return 65
-        safe_target "$target_path" || return 65
-        [[ ! -e "$target_path" && ! -L "$target_path" ]] || return 65
-        ln -s -- "$source" "$target_path" || return 65
+        relative_path=${PLAN_PATH[$i]}
+        apply_install_entry "$source" "$target_path" "$relative_path" || return 65
     done
 }
 
