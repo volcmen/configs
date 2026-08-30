@@ -157,12 +157,13 @@ test_diff_classifies_every_target_state() {
     printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/linked"
     printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/foreign"
     printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/conflict"
+    printf 'foreign\n' >"$TEST_TMP/home/.config/demo/not-managed"
     write_manifest $'demo|macos|file|.config/demo/missing|plain|yes|1\ndemo|macos|file|.config/demo/match|plain|yes|1\ndemo|macos|file|.config/demo/drift|plain|yes|1\ndemo|macos|file|.config/demo/linked|plain|yes|1\ndemo|macos|file|.config/demo/foreign|plain|yes|1\ndemo|macos|file|.config/demo/conflict|plain|yes|1'
     printf 'canonical\n' >"$TEST_TMP/home/.config/demo/match"
     printf 'different\n' >"$TEST_TMP/home/.config/demo/drift"
     linked_source="$(cd "$TEST_TMP/repo/home/.config/demo" && pwd -P)/linked"
     ln -s "$linked_source" "$TEST_TMP/home/.config/demo/linked"
-    ln -s "$TEST_TMP/repo/home/.config/demo/foreign" "$TEST_TMP/home/.config/demo/foreign"
+    ln -s "$TEST_TMP/home/.config/demo/not-managed" "$TEST_TMP/home/.config/demo/foreign"
     mkdir "$TEST_TMP/home/.config/demo/conflict"
     run_cli diff
     assert_status 1 && \
@@ -183,6 +184,21 @@ test_diff_never_prints_binary_drift() {
     write_manifest 'demo|macos|file|.config/demo/binary|plain|yes|1'
     run_cli diff
     assert_status 1 && assert_contains 'DRIFT demo .config/demo/binary' && [[ "$CLI_OUTPUT" != *'canonical'* ]] && [[ "$CLI_OUTPUT" != *'different'* ]]
+}
+
+test_diff_never_prints_non_nul_binary_drift() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'source-payload\001\002\377\n' >"$TEST_TMP/repo/home/.config/demo/binary"
+    printf 'target-payload\001\002\377\n' >"$TEST_TMP/home/.config/demo/binary"
+    write_manifest 'demo|macos|file|.config/demo/binary|plain|yes|1'
+    run_cli diff
+    assert_status 1 && \
+        assert_contains 'DRIFT demo .config/demo/binary' && \
+        [[ "$CLI_OUTPUT" != *'source-payload'* ]] && \
+        [[ "$CLI_OUTPUT" != *'target-payload'* ]] && \
+        [[ "$CLI_OUTPUT" != *'@@'* ]] && \
+        [[ "$CLI_OUTPUT" != *'--- '* ]]
 }
 
 test_diff_prints_text_drift_at_hex_byte_boundary() {
@@ -213,6 +229,33 @@ test_diff_allows_read_only_cross_platform_staging() {
     run_cli diff --target arch --staging-home "$TEST_TMP/staging"
     assert_status 1 && assert_contains 'MISSING demo .config/demo/config' || return 1
     assert_not_exists "$TEST_TMP/staging/.config/demo/config"
+}
+
+test_diff_rejects_live_home_as_cross_platform_staging() {
+    local alias_home
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|arch|file|.config/demo/config|plain|yes|1'
+
+    run_cli diff --target arch --staging-home "$TEST_TMP/home"
+    assert_status 64 && assert_contains 'staging home must not resolve to live home' || return 1
+
+    run_cli diff --target arch --staging-home "$TEST_TMP/home/."
+    assert_status 64 && assert_contains 'staging home must not resolve to live home' || return 1
+
+    alias_home="$TEST_TMP/home-alias"
+    ln -s "$TEST_TMP/home" "$alias_home"
+    run_cli diff --target arch --staging-home "$alias_home"
+    assert_status 64 && assert_contains 'staging home must not resolve to live home'
+}
+
+test_diff_fails_closed_without_canonical_source_root() {
+    new_fixture
+    rm -rf -- "$TEST_TMP/repo/home"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    run_cli diff
+    assert_status 65 && assert_contains 'canonical source root is unavailable'
 }
 
 test_diff_blocks_unsafe_source_paths() {
@@ -301,9 +344,12 @@ run_test test_manifest_rejects_unknown_validator
 run_test test_manifest_rejects_unknown_required_value
 run_test test_diff_classifies_every_target_state
 run_test test_diff_never_prints_binary_drift
+run_test test_diff_never_prints_non_nul_binary_drift
 run_test test_diff_prints_text_drift_at_hex_byte_boundary
 run_test test_diff_refuses_cross_platform_live_home
 run_test test_diff_allows_read_only_cross_platform_staging
+run_test test_diff_rejects_live_home_as_cross_platform_staging
+run_test test_diff_fails_closed_without_canonical_source_root
 run_test test_diff_blocks_unsafe_source_paths
 run_test test_diff_blocks_unsafe_target_ancestors
 run_test test_install_rejects_target_and_staging_options

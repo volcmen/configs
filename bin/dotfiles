@@ -2,10 +2,16 @@
 set -u
 
 PROGRAM=${0##*/}
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+
+startup_die() {
+    printf '%s: %s\n' "$PROGRAM" "$*" >&2
+    exit 65
+}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)" || startup_die 'script directory is unavailable'
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)" || startup_die 'repository root is unavailable'
+SOURCE_ROOT="$(cd "$REPO_ROOT/home" 2>/dev/null && pwd -P)" || startup_die 'canonical source root is unavailable'
 MANIFEST="$REPO_ROOT/dotfiles.manifest"
-SOURCE_ROOT="$(cd "$REPO_ROOT/home" && pwd -P)"
 
 MF_APP=(); MF_PLATFORMS=(); MF_KIND=(); MF_PATH=()
 MF_VALIDATOR=(); MF_REQUIRED=(); MF_TESTED=()
@@ -230,11 +236,29 @@ artifact_status() {
 }
 
 text_artifact() {
-    ! LC_ALL=C od -An -tx1 "$1" | grep -Eq '(^|[[:space:]])00([[:space:]]|$)'
+    command -v iconv >/dev/null 2>&1 || return 1
+    command -v od >/dev/null 2>&1 || return 1
+    command -v awk >/dev/null 2>&1 || return 1
+    [[ -r "$1" ]] || return 1
+    iconv -f UTF-8 -t UTF-8 "$1" >/dev/null 2>&1 || return 1
+    (
+        set -o pipefail
+        LC_ALL=C od -An -tu1 "$1" | awk '
+            {
+                for (i = 1; i <= NF; i++) {
+                    if (($i < 32 && $i != 9 && $i != 10 && $i != 13) || $i == 127) {
+                        bad = 1
+                        exit
+                    }
+                }
+            }
+            END { exit bad }
+        '
+    )
 }
 
 command_diff() {
-    local staging_home='' staging_seen=0 target_option='' target_seen=0 host target target_home source target_path status
+    local staging_home='' staging_seen=0 target_option='' target_seen=0 host target target_home live_home live_home_physical staging_physical source target_path status
     local i drift=0 blocked=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -267,6 +291,12 @@ command_diff() {
         die 64 "target $target requires --staging-home"
     fi
     if [[ -n "$staging_home" ]]; then
+        live_home=$(effective_home)
+        live_home_physical=$(physical_dir "$live_home") || die 65 'live home cannot be resolved'
+        staging_physical=$(physical_dir "$staging_home") || staging_physical=''
+        if [[ -n "$staging_physical" && "$staging_physical" == "$live_home_physical" ]]; then
+            die 64 'staging home must not resolve to live home'
+        fi
         target_home=$staging_home
     else
         target_home=$(effective_home)
