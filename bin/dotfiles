@@ -338,7 +338,7 @@ validation_detail() {
 }
 
 probe_hyprland_runtime_validation() {
-    local detail status
+    local captured detail status
     [[ $HYPRLAND_RUNTIME_PROBED -eq 0 ]] || return 0
     HYPRLAND_RUNTIME_PROBED=1
     if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
@@ -351,8 +351,13 @@ probe_hyprland_runtime_validation() {
         HYPRLAND_RUNTIME_DETAIL='hyprctl is unavailable'
         return
     fi
-    detail=$(hyprctl configerrors 2>&1)
-    status=$?
+    captured=$({ hyprctl configerrors 2>&1; printf '\037%s' "$?"; })
+    status=${captured##*$'\037'}
+    detail=${captured%$'\037'*}
+    if [[ "$captured" != *$'\037'* || ! "$status" =~ ^[0-9]+$ ]]; then
+        status=1
+        detail='hyprctl returned an unreadable result'
+    fi
     if [[ $status -eq 0 && -z "$detail" ]]; then
         HYPRLAND_RUNTIME_STATUS=0
         HYPRLAND_RUNTIME_DETAIL='Hyprland runtime validation passed'

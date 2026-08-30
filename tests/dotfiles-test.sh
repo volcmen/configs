@@ -288,6 +288,31 @@ STUB
         assert_contains 'Config error: invalid monitor rule'
 }
 
+test_check_blocks_newline_only_hyprland_runtime_output() {
+    local validator_bin
+    new_fixture
+    validator_bin="$TEST_TMP/validator-bin"
+    mkdir -p "$validator_bin" "$TEST_TMP/repo/home/.config/hypr"
+    printf 'return {}\n' >"$TEST_TMP/repo/home/.config/hypr/one.lua"
+    write_os_release 'ID=arch'
+    write_manifest 'hyprland|arch|file|.config/hypr/one.lua|hyprland-lua|yes|1'
+    cat >"$validator_bin/luac" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+    cat >"$validator_bin/hyprctl" <<STUB
+#!/bin/sh
+printf '%s\\n' "\$*" >>"$TEST_TMP/hyprctl-calls"
+printf '\\n'
+exit 0
+STUB
+    chmod +x "$validator_bin/luac" "$validator_bin/hyprctl"
+    DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" HYPRLAND_INSTANCE_SIGNATURE=active run_cli check --target arch
+    assert_status 1 && \
+        [[ "$(wc -l <"$TEST_TMP/hyprctl-calls")" -eq 1 ]] && \
+        assert_contains 'BLOCKED hyprland .config/hypr/one.lua: validator reported diagnostic output'
+}
+
 test_check_sanitizes_validator_control_diagnostics() {
     local validator_bin
     new_fixture
@@ -1394,6 +1419,7 @@ run_test test_check_marks_missing_native_validator_runtime_unverified
 run_test test_check_marks_arch_hyprland_static_only_on_macos
 run_test test_check_caches_clean_hyprland_runtime_probe
 run_test test_check_blocks_hyprland_runtime_error_text_with_success_status
+run_test test_check_blocks_newline_only_hyprland_runtime_output
 run_test test_check_sanitizes_validator_control_diagnostics
 run_test test_check_never_executes_manifest_validator_text
 run_test test_diff_classifies_every_target_state
