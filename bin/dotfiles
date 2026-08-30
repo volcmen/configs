@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -u
+
+PROGRAM=${0##*/}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+MANIFEST="$REPO_ROOT/dotfiles.manifest"
+SOURCE_ROOT="$REPO_ROOT/home"
+
+usage() {
+    cat <<'USAGE'
+Usage: dotfiles <command> [options]
+
+Commands:
+  detect                  print the physical host platform
+  check [--target NAME]   validate canonical configuration
+  diff                    compare canonical and live state
+  install [--apply] [--backup]
+                          preview or apply the installation plan
+  help                    show this help
+USAGE
+}
+
+die() {
+    local status=$1
+    shift
+    printf '%s: %s\n' "$PROGRAM" "$*" >&2
+    exit "$status"
+}
+
+main() {
+    local command=${1:-help}
+    [[ $# -eq 0 ]] || shift
+    case "$command" in
+        help|-h|--help) usage ;;
+        detect|check|diff|install) die 69 "$command is not implemented" ;;
+        *) die 64 "unknown command: $command" ;;
+    esac
+}
+
+main "$@"
