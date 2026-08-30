@@ -99,6 +99,12 @@ test_value() {
     esac
 }
 
+install_test_hook() {
+    [[ ${DOTFILES_TESTING:-0} == 1 && -n ${DOTFILES_TEST_INSTALL_HOOK:-} ]] || return 0
+    [[ -x "$DOTFILES_TEST_INSTALL_HOOK" ]] || return 1
+    "$DOTFILES_TEST_INSTALL_HOOK" "$@"
+}
+
 kernel_name() {
     local value
     value=$(test_value DOTFILES_TEST_UNAME) || true
@@ -378,12 +384,15 @@ build_install_plan() {
 }
 
 prepare_install_parent() {
-    local relative_path=$1 component physical parent_physical i
+    local relative_path=$1 expected_root=$2 component physical parent_physical i
     local components=()
 
     [[ ! -L "$EFFECTIVE_HOME" && -d "$EFFECTIVE_HOME" ]] || return 1
+    install_test_hook before_prepare_parent "$EFFECTIVE_HOME" || return 1
     cd -P -- "$EFFECTIVE_HOME" || return 1
-    TARGET_ROOT_PHYSICAL=$(pwd -P) || return 1
+    physical=$(pwd -P) || return 1
+    [[ "$physical" == "$expected_root" ]] || return 1
+    TARGET_ROOT_PHYSICAL=$expected_root
 
     IFS=/ read -r -a components <<<"$relative_path"
     for ((i=0; i<${#components[@]}-1; i++)); do
@@ -404,12 +413,15 @@ prepare_install_parent() {
 }
 
 apply_install_entry() (
-    local source=$1 target_path=$2 relative_path=$3 target_name
+    local source=$1 target_path=$2 relative_path=$3 target_name expected_root
 
     TARGET_RELATIVE_PATH=$relative_path
     safe_source "$source" || return 65
+    TARGET_ROOT_PHYSICAL=''
     safe_target "$target_path" || return 65
-    prepare_install_parent "$relative_path" || return 65
+    expected_root=$TARGET_ROOT_PHYSICAL
+    [[ -n "$expected_root" ]] || return 65
+    prepare_install_parent "$relative_path" "$expected_root" || return 65
     safe_target "$target_path" || return 65
     target_name=${relative_path##*/}
     [[ ! -e "$target_name" && ! -L "$target_name" ]] || return 65

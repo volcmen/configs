@@ -36,6 +36,7 @@ run_cli() {
         DOTFILES_TEST_HOME="$TEST_TMP/home" \
         DOTFILES_TEST_UNAME="$test_uname" \
         DOTFILES_TEST_OS_RELEASE="$test_os_release" \
+        DOTFILES_TEST_INSTALL_HOOK="${DOTFILES_TEST_INSTALL_HOOK:-}" \
         PATH="${DOTFILES_TEST_PATH:-$PATH}" \
         "$TEST_TMP/repo/bin/dotfiles" "$@" 2>&1)"; then
         CLI_STATUS=0
@@ -440,6 +441,26 @@ STUB
     assert_not_exists "$TEST_TMP/outside/.config"
 }
 
+test_install_rejects_home_swapped_before_pinning() {
+    local hook
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/outside"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/swap-home-before-pin"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = before_prepare_parent ]; then
+    /bin/mv "\$2" "\$2.original"
+    /bin/ln -s "$TEST_TMP/outside" "\$2"
+fi
+STUB
+    chmod +x "$hook"
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
+    [[ "$CLI_STATUS" -ne 0 ]] || { fail 'install accepted a home swapped before physical pinning'; return 1; }
+    assert_not_exists "$TEST_TMP/outside/.config"
+}
+
 test_dotfiles_copy_dispatches_portably() {
     local helper="$PROJECT_ROOT/home/.local/bin/dotfiles-copy"
     local stub_path empty_path output status
@@ -506,6 +527,7 @@ run_test test_install_backup_does_not_replace_conflicts
 run_test test_install_blocks_symlinked_parent
 run_test test_install_rechecks_source_after_parent_preparation
 run_test test_install_does_not_follow_parent_swapped_before_mkdir
+run_test test_install_rejects_home_swapped_before_pinning
 run_test test_dotfiles_copy_dispatches_portably
 printf '%s passed; %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 [[ "$FAIL_COUNT" -eq 0 ]]
