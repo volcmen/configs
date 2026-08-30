@@ -28,12 +28,62 @@ die() {
     exit "$status"
 }
 
+test_value() {
+    [[ ${DOTFILES_TESTING:-0} == 1 ]] || return 1
+    case "$1" in
+        DOTFILES_TEST_UNAME) printf '%s' "${DOTFILES_TEST_UNAME:-}" ;;
+        DOTFILES_TEST_OS_RELEASE) printf '%s' "${DOTFILES_TEST_OS_RELEASE:-}" ;;
+        *) return 1 ;;
+    esac
+}
+
+kernel_name() {
+    local value
+    value=$(test_value DOTFILES_TEST_UNAME) || true
+    if [[ -n "$value" ]]; then printf '%s\n' "$value"; else uname -s; fi
+}
+
+os_release_path() {
+    local value
+    value=$(test_value DOTFILES_TEST_OS_RELEASE) || true
+    if [[ -n "$value" ]]; then printf '%s\n' "$value"; else printf '/etc/os-release\n'; fi
+}
+
+os_release_id() {
+    local file key value
+    file=$(os_release_path)
+    [[ -r "$file" ]] || return 1
+    while IFS='=' read -r key value; do
+        [[ "$key" == ID ]] || continue
+        value=${value#\"}; value=${value%\"}
+        value=${value#\'}; value=${value%\'}
+        printf '%s\n' "$value"
+        return 0
+    done <"$file"
+    return 1
+}
+
+detect_host() {
+    local kernel id
+    kernel=$(kernel_name)
+    case "$kernel" in
+        Darwin) printf 'macos\n' ;;
+        Linux)
+            id=$(os_release_id) || die 69 'unsupported host: Linux without readable ID'
+            [[ "$id" == arch ]] || die 69 "unsupported host: Linux ID=$id"
+            printf 'arch\n'
+            ;;
+        *) die 69 "unsupported host kernel: $kernel" ;;
+    esac
+}
+
 main() {
     local command=${1:-help}
     [[ $# -eq 0 ]] || shift
     case "$command" in
         help|-h|--help) usage ;;
-        detect|check|diff|install) die 69 "$command is not implemented" ;;
+        detect) detect_host ;;
+        check|diff|install) die 69 "$command is not implemented" ;;
         *) die 64 "unknown command: $command" ;;
     esac
 }

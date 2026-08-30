@@ -42,6 +42,23 @@ run_cli() {
     fi
 }
 
+write_os_release() {
+    printf '%s\n' "$1" >"$TEST_TMP/os-release"
+}
+
+run_detect() {
+    if CLI_OUTPUT="$(DOTFILES_TESTING=1 \
+        DOTFILES_TEST_HOME="$TEST_TMP/home" \
+        DOTFILES_TEST_UNAME="$1" \
+        DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" \
+        DOTFILES_TARGET="${2:-}" \
+        "$TEST_TMP/repo/bin/dotfiles" detect 2>&1)"; then
+        CLI_STATUS=0
+    else
+        CLI_STATUS=$?
+    fi
+}
+
 run_test() {
     local name=$1
     if "$name"; then
@@ -65,7 +82,25 @@ test_unknown_command_fails() {
     assert_status 64 && assert_contains 'unknown command: explode'
 }
 
+test_detects_macos_and_ignores_target() {
+    new_fixture; write_os_release 'ID=arch'; run_detect Darwin arch
+    assert_status 0 && [[ "$CLI_OUTPUT" == macos ]]
+}
+
+test_detects_exact_arch() {
+    new_fixture; write_os_release 'ID="arch"'; run_detect Linux
+    assert_status 0 && [[ "$CLI_OUTPUT" == arch ]]
+}
+
+test_rejects_arch_derivative_and_other_linux() {
+    new_fixture; write_os_release $'ID=manjaro\nID_LIKE=arch'; run_detect Linux
+    assert_status 69 && assert_contains 'unsupported host'
+}
+
 run_test test_help
 run_test test_unknown_command_fails
+run_test test_detects_macos_and_ignores_target
+run_test test_detects_exact_arch
+run_test test_rejects_arch_derivative_and_other_linux
 printf '%s passed; %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 [[ "$FAIL_COUNT" -eq 0 ]]
