@@ -1459,6 +1459,30 @@ test_shared_fish_yazi_and_fontconfig_are_portable() {
     xmllint --noout "$fonts_conf" "$readability_conf"
 }
 
+test_hyprland_animations_use_curve_field() {
+    local looknfeel="$PROJECT_ROOT/home/.config/hypr/hyprland/looknfeel.lua"
+
+    ! grep -Eq 'hl\.animation.*(bezier|spring)[[:space:]]*=' "$looknfeel" || return 1
+    grep -Fq 'hl.animation({ leaf = "global", enabled = true, speed = 10, curve = "default" })' "$looknfeel" || return 1
+    grep -Fq 'hl.animation({ leaf = "windows", enabled = true, speed = 4.79, curve = "easy" })' "$looknfeel"
+}
+
+test_hypridle_uses_lua_dpms_dispatch() {
+    local hypridle="$PROJECT_ROOT/home/.config/hypr/hypridle.conf"
+
+    ! grep -Fq 'hyprctl dispatch dpms' "$hypridle" || return 1
+    grep -Fq 'hyprctl dispatch '\''hl.dsp.dpms({ action = "disable" })'\''' "$hypridle" || return 1
+    grep -Fq 'hyprctl dispatch '\''hl.dsp.dpms({ action = "enable" })'\''' "$hypridle"
+}
+
+test_waybar_uses_lua_workspace_dispatch_and_uwsm_logout() {
+    local waybar="$PROJECT_ROOT/home/.config/waybar/config.jsonc"
+
+    grep -Fq '"on-scroll-up": "hyprctl dispatch '\''hl.dsp.focus({ workspace = \"e+1\" })'\''",' "$waybar" || return 1
+    grep -Fq '"on-scroll-down": "hyprctl dispatch '\''hl.dsp.focus({ workspace = \"e-1\" })'\''"' "$waybar" || return 1
+    grep -Fq '"logout":   "uwsm stop",' "$waybar"
+}
+
 run_test test_help
 run_test test_unknown_command_fails
 run_test test_detects_macos_and_ignores_target
@@ -1533,6 +1557,9 @@ run_test test_install_blocks_symlinked_parent
 run_test test_install_rechecks_source_after_parent_preparation
 run_test test_install_does_not_follow_parent_swapped_before_mkdir
 run_test test_install_rejects_home_swapped_before_pinning
+run_test test_hyprland_animations_use_curve_field
+run_test test_hypridle_uses_lua_dpms_dispatch
+run_test test_waybar_uses_lua_workspace_dispatch_and_uwsm_logout
 run_test test_dotfiles_copy_dispatches_portably
 run_test test_shared_terminal_behavior_is_canonical
 run_test test_shared_fish_yazi_and_fontconfig_are_portable

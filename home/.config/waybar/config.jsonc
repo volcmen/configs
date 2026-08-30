@@ -84,8 +84,8 @@
             "class<(waybar|rofi|wofi|xwaylandvideobridge|polkit-gnome-authentication-agent-1)>": ""
         },
         "on-click": "activate",
-        "on-scroll-up": "hyprctl dispatch workspace e+1",
-        "on-scroll-down": "hyprctl dispatch workspace e-1"
+        "on-scroll-up": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e+1\" })'",
+        "on-scroll-down": "hyprctl dispatch 'hl.dsp.focus({ workspace = \"e-1\" })'"
     },
 
     "clock": {
@@ -177,7 +177,7 @@
         "menu-actions": {
             "lock":     "loginctl lock-session",
             "suspend":  "systemctl suspend",
-            "logout":   "loginctl kill-session $XDG_SESSION_ID",
+            "logout":   "uwsm stop",
             "reboot":   "systemctl reboot",
             "shutdown": "systemctl poweroff"
         }
