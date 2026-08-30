@@ -275,6 +275,81 @@ text_artifact() {
     )
 }
 
+validate_jsonc() {
+    local file=$1
+    command -v bun >/dev/null 2>&1 || return 125
+    bun -e 'const file = process.argv[1]; Bun.JSONC.parse(await Bun.file(file).text());' "$file"
+}
+
+validate_toml() {
+    local file=$1
+    command -v python3 >/dev/null 2>&1 || return 125
+    python3 -c 'import tomllib' >/dev/null 2>&1 || return 125
+    python3 -c 'import sys,tomllib; f=open(sys.argv[1], "rb"); tomllib.load(f); f.close()' "$file"
+}
+
+run_validator() {
+    local id=$1 file=$2 target=$3
+    case "$id" in
+        plain) return 0 ;;
+        shell) bash -n "$file" ;;
+        fish) command -v fish >/dev/null 2>&1 || return 125; fish -n "$file" ;;
+        git) command -v git >/dev/null 2>&1 || return 125; git config --file "$file" --list >/dev/null ;;
+        lua|hyprland-lua) command -v luac >/dev/null 2>&1 || return 125; luac -p "$file" ;;
+        python)
+            command -v python3 >/dev/null 2>&1 || return 125
+            python3 -c 'import pathlib,sys; p=pathlib.Path(sys.argv[1]); compile(p.read_bytes(), str(p), "exec")' "$file"
+            ;;
+        xml|fontconfig) command -v xmllint >/dev/null 2>&1 || return 125; xmllint --noout "$file" ;;
+        uwsm-shell) sh -n "$file" ;;
+        zellij)
+            command -v zellij >/dev/null 2>&1 || return 125
+            zellij --config "$file" setup --check >/dev/null
+            ;;
+        starship)
+            command -v starship >/dev/null 2>&1 || return 125
+            STARSHIP_CONFIG="$file" STARSHIP_LOG=error starship print-config >/dev/null
+            ;;
+        jsonc) validate_jsonc "$file" ;;
+        toml) validate_toml "$file" ;;
+        kitty|mpv|hyprconf|ini|mako|css) return 125 ;;
+        *) return 64 ;;
+    esac
+}
+
+validation_detail() {
+    local detail=$1 status=$2
+    detail=${detail//$'\r'/ }
+    detail=${detail//$'\n'/ }
+    detail=${detail#"${detail%%[![:space:]]*}"}
+    detail=${detail%"${detail##*[![:space:]]}"}
+    if [[ -z "$detail" ]]; then
+        printf 'validator exited %s' "$status"
+    else
+        printf '%s' "${detail:0:240}"
+    fi
+}
+
+run_hyprland_runtime_validation() {
+    local app=$1 path=$2 detail status
+    if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+        printf 'RUNTIME UNVERIFIED %s %s: requires an Arch Hyprland session\n' "$app" "$path"
+        return 0
+    fi
+    if ! command -v hyprctl >/dev/null 2>&1; then
+        printf 'RUNTIME UNVERIFIED %s %s: hyprctl is unavailable\n' "$app" "$path"
+        return 0
+    fi
+    detail=$(hyprctl configerrors 2>&1)
+    status=$?
+    if [[ $status -eq 0 ]]; then
+        printf 'PASS %s %s: Hyprland runtime validation passed\n' "$app" "$path"
+        return 0
+    fi
+    printf 'BLOCKED %s %s: %s\n' "$app" "$path" "$(validation_detail "$detail" "$status")"
+    return 1
+}
+
 command_diff() {
     local staging_home='' staging_seen=0 target_option='' target_seen=0 host target target_home live_home live_home_physical staging_physical source target_path status
     local i drift=0 blocked=0
@@ -1239,9 +1314,56 @@ command_install() {
     finish_transaction
 }
 
-check() {
+command_check() {
+    local host source validator_detail_output validator_status runtime_status
+    local i blocked=0
+
     validation_target "$@"
+    detect_host >/dev/null
+    host=$HOST_PLATFORM
     parse_manifest "$MANIFEST"
+
+    for ((i=0; i<${#MF_PATH[@]}; i++)); do
+        platform_selected "${MF_PLATFORMS[$i]}" "$VALIDATION_TARGET" || continue
+        source="$SOURCE_ROOT/${MF_PATH[$i]}"
+        if ! safe_source "$source"; then
+            printf 'BLOCKED %s %s: canonical source is unsafe or unavailable\n' "${MF_APP[$i]}" "${MF_PATH[$i]}"
+            blocked=1
+            continue
+        fi
+
+        validator_detail_output=$(run_validator "${MF_VALIDATOR[$i]}" "$source" "$VALIDATION_TARGET" 2>&1)
+        validator_status=$?
+        case "$validator_status" in
+            0)
+                if [[ "$VALIDATION_TARGET" == "$host" ]]; then
+                    printf 'PASS %s %s: syntax validated\n' "${MF_APP[$i]}" "${MF_PATH[$i]}"
+                else
+                    printf 'STATIC PASS %s %s: syntax validated on %s\n' "${MF_APP[$i]}" "${MF_PATH[$i]}" "$host"
+                fi
+                ;;
+            125)
+                printf 'RUNTIME UNVERIFIED %s %s: validator unavailable or intentionally unsafe on %s\n' "${MF_APP[$i]}" "${MF_PATH[$i]}" "$host"
+                ;;
+            *)
+                printf 'BLOCKED %s %s: %s\n' "${MF_APP[$i]}" "${MF_PATH[$i]}" "$(validation_detail "$validator_detail_output" "$validator_status")"
+                blocked=1
+                continue
+                ;;
+        esac
+
+        if [[ "${MF_VALIDATOR[$i]}" == hyprland-lua ]]; then
+            if [[ "$host" != arch || "$VALIDATION_TARGET" != arch ]]; then
+                printf 'RUNTIME UNVERIFIED %s %s: requires an Arch Hyprland session\n' "${MF_APP[$i]}" "${MF_PATH[$i]}"
+            else
+                run_hyprland_runtime_validation "${MF_APP[$i]}" "${MF_PATH[$i]}"
+                runtime_status=$?
+                [[ $runtime_status -eq 0 ]] || blocked=1
+            fi
+        fi
+    done
+
+    [[ $blocked -eq 0 ]]
 }
 
 main() {
@@ -1250,7 +1372,7 @@ main() {
     case "$command" in
         help|-h|--help) usage ;;
         detect) detect_host ;;
-        check) check "$@" ;;
+        check) command_check "$@" ;;
         diff) command_diff "$@" ;;
         install) command_install "$@" ;;
         *) die 64 "unknown command: $command" ;;

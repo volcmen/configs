@@ -160,6 +160,91 @@ test_manifest_rejects_unknown_required_value() {
     assert_status 65 && assert_contains 'manifest line 1'
 }
 
+test_check_blocks_malformed_files_with_available_validators() {
+    local validator_bin
+    new_fixture
+    validator_bin="$TEST_TMP/validator-bin"
+    mkdir -p "$validator_bin" "$TEST_TMP/repo/home/.config/demo"
+    printf 'if then\n' >"$TEST_TMP/repo/home/.config/demo/bad.sh"
+    printf 'malformed\n' >"$TEST_TMP/repo/home/.config/demo/bad.fish"
+    printf 'malformed\n' >"$TEST_TMP/repo/home/.config/demo/bad.gitconfig"
+    printf 'malformed\n' >"$TEST_TMP/repo/home/.config/demo/bad.xml"
+    printf 'malformed\n' >"$TEST_TMP/repo/home/.config/demo/bad.lua"
+    printf 'malformed\n' >"$TEST_TMP/repo/home/.config/demo/bad.jsonc"
+    write_manifest $'shell-app|macos|file|.config/demo/bad.sh|shell|yes|1\nfish-app|macos|file|.config/demo/bad.fish|fish|yes|1\ngit-app|macos|file|.config/demo/bad.gitconfig|git|yes|1\nxml-app|macos|file|.config/demo/bad.xml|xml|yes|1\nlua-app|macos|file|.config/demo/bad.lua|lua|yes|1\njson-app|macos|file|.config/demo/bad.jsonc|jsonc|yes|1'
+    for command in fish git xmllint luac bun; do
+        cat >"$validator_bin/$command" <<STUB
+#!/bin/sh
+case "${command}" in
+    git) file=\$3 ;;
+    *) for argument do file=\$argument; done ;;
+esac
+printf '%s %s\\n' "${command}" "\$*" >>"$TEST_TMP/validator-args"
+if /usr/bin/grep -q malformed "\$file"; then exit 9; fi
+exit 0
+STUB
+        chmod +x "$validator_bin/$command"
+    done
+    DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" run_cli check --target macos
+    assert_status 1 && \
+        assert_contains 'BLOCKED shell-app .config/demo/bad.sh:' && \
+        assert_contains 'BLOCKED fish-app .config/demo/bad.fish:' && \
+        assert_contains 'BLOCKED git-app .config/demo/bad.gitconfig:' && \
+        assert_contains 'BLOCKED xml-app .config/demo/bad.xml:' && \
+        assert_contains 'BLOCKED lua-app .config/demo/bad.lua:' && \
+        assert_contains 'BLOCKED json-app .config/demo/bad.jsonc:' && \
+        [[ "$(wc -l <"$TEST_TMP/validator-args")" -eq 5 ]]
+}
+
+test_check_passes_valid_file() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'true\n' >"$TEST_TMP/repo/home/.config/demo/good.sh"
+    write_manifest 'shell-app|macos|file|.config/demo/good.sh|shell|yes|1'
+    run_cli check --target macos
+    assert_status 0 && assert_contains 'PASS shell-app .config/demo/good.sh:'
+}
+
+test_check_marks_missing_native_validator_runtime_unverified() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'set -g demo true\n' >"$TEST_TMP/repo/home/.config/demo/config.fish"
+    write_manifest 'fish-app|macos|file|.config/demo/config.fish|fish|yes|1'
+    DOTFILES_TEST_PATH='/usr/bin:/bin' run_cli check --target macos
+    assert_status 0 && \
+        assert_contains 'RUNTIME UNVERIFIED fish-app .config/demo/config.fish:' && \
+        [[ "$CLI_OUTPUT" != *'PASS fish-app .config/demo/config.fish:'* ]]
+}
+
+test_check_marks_arch_hyprland_static_only_on_macos() {
+    local validator_bin
+    new_fixture
+    validator_bin="$TEST_TMP/validator-bin"
+    mkdir -p "$validator_bin" "$TEST_TMP/repo/home/.config/hypr"
+    printf 'return {}\n' >"$TEST_TMP/repo/home/.config/hypr/hyprland.lua"
+    write_manifest 'hyprland|arch|file|.config/hypr/hyprland.lua|hyprland-lua|yes|1'
+    cat >"$validator_bin/luac" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+    chmod +x "$validator_bin/luac"
+    DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" run_cli check --target arch
+    assert_status 0 && \
+        assert_contains 'STATIC PASS hyprland .config/hypr/hyprland.lua:' && \
+        assert_contains 'RUNTIME UNVERIFIED hyprland .config/hypr/hyprland.lua: requires an Arch Hyprland session'
+}
+
+test_check_never_executes_manifest_validator_text() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'safe\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest "demo|macos|file|.config/demo/config|plain;touch $TEST_TMP/manifest-executed|yes|1"
+    run_cli check --target macos
+    assert_status 65 && \
+        assert_contains 'unknown validator' && \
+        assert_not_exists "$TEST_TMP/manifest-executed"
+}
+
 test_diff_classifies_every_target_state() {
     local linked_source
     new_fixture
@@ -1229,6 +1314,11 @@ run_test test_manifest_rejects_unknown_platform
 run_test test_manifest_rejects_unknown_kind
 run_test test_manifest_rejects_unknown_validator
 run_test test_manifest_rejects_unknown_required_value
+run_test test_check_blocks_malformed_files_with_available_validators
+run_test test_check_passes_valid_file
+run_test test_check_marks_missing_native_validator_runtime_unverified
+run_test test_check_marks_arch_hyprland_static_only_on_macos
+run_test test_check_never_executes_manifest_validator_text
 run_test test_diff_classifies_every_target_state
 run_test test_diff_never_prints_binary_drift
 run_test test_diff_never_prints_non_nul_binary_drift
