@@ -1483,6 +1483,51 @@ test_waybar_uses_lua_workspace_dispatch_and_uwsm_logout() {
     grep -Fq '"logout":   "uwsm stop",' "$waybar"
 }
 
+test_documentation_records_operations_and_compatibility_evidence() {
+    local readme="$PROJECT_ROOT/README.md"
+    local audit="$PROJECT_ROOT/docs/compatibility/2026-08-30-platform-audit.md"
+    local heading evidence
+
+    for heading in \
+        'Requirements' \
+        'Quick start' \
+        'Detect and check' \
+        'Preview and install' \
+        'Backups and recovery' \
+        'Using doti' \
+        'Updating versions' \
+        'Arch/Hyprland runtime verification'
+    do
+        grep -Fqx "## $heading" "$readme" || return 1
+    done
+
+    for evidence in \
+        'STATIC PASS' \
+        'RUNTIME UNVERIFIED' \
+        'Fish 4.8.1' \
+        'Git 2.55.0' \
+        'Starship 1.26.0' \
+        'Kitty 0.47.2' \
+        'Zellij 0.45.1' \
+        'Yazi 26.8.15' \
+        'mpv 0.41.0' \
+        'Fontconfig 2.18.3' \
+        'home/.config/kitty/kitty.conf' \
+        'home/.config/kitty/kitty-kitten-search/search.py' \
+        'home/.config/kitty/kitty-kitten-search/scroll_mark.py' \
+        'home/.config/zellij/config.kdl' \
+        'https://wiki.hypr.land/Configuring/Start/' \
+        'https://fishshell.com/docs/4.4/relnotes.html' \
+        'https://sw.kovidgoyal.net/kitty/conf/' \
+        'https://zellij.dev/documentation/options.html' \
+        'https://yazi-rs.github.io/docs/configuration/keymap/' \
+        'https://man.archlinux.org/man/fuzzel.1.en' \
+        'https://man.archlinux.org/man/mako.5'
+    do
+        grep -Fq "$evidence" "$audit" || return 1
+    done
+}
+
 run_test test_help
 run_test test_unknown_command_fails
 run_test test_detects_macos_and_ignores_target
@@ -1563,5 +1608,6 @@ run_test test_waybar_uses_lua_workspace_dispatch_and_uwsm_logout
 run_test test_dotfiles_copy_dispatches_portably
 run_test test_shared_terminal_behavior_is_canonical
 run_test test_shared_fish_yazi_and_fontconfig_are_portable
+run_test test_documentation_records_operations_and_compatibility_evidence
 printf '%s passed; %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 [[ "$FAIL_COUNT" -eq 0 ]]

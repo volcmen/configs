@@ -1,27 +1,177 @@
 # Dotfiles
 
-Personal configuration files managed with [**doti**](https://github.com/volcmen/doti).
+One canonical `home/` tree for macOS and Arch Linux with Hyprland. The
+repository-native `./bin/dotfiles` command detects the host, validates selected
+sources, previews drift, and installs absolute symlinks safely. It never
+installs or updates packages and never reloads applications, services, or the
+compositor.
 
-## Structure
+## Requirements
 
-```
-home/           Mirrors $HOME — all config files live here
-  .config/        ~/.config/ configs (hypr, kitty, fish, etc.)
-  .bashrc         Root-level dotfiles
-  .local/         ~/.local/ files
-```
+- Git and Bash 3.2 or newer.
+- macOS, or Arch Linux identified exactly as `ID=arch` in `/etc/os-release`.
+- Standard platform utilities used by the safety checks. Application binaries
+  such as Fish, Zellij, or Starship enable stronger native validation when they
+  are installed; an unavailable native validator is reported as
+  `RUNTIME UNVERIFIED`.
 
-## Setup
+The manager does not depend on Homebrew, Python, Node, Bun, `jq`, GNU
+coreutils, or doti. Individual configuration files still require their owning
+applications when you use them.
+
+## Quick start
+
+Clone anywhere; `$HOME/.dotfiles` is the recommended example:
 
 ```bash
-git clone https://github.com/volcmen/configs.git ~/Development/personal/configs
+git clone https://github.com/volcmen/configs.git "$HOME/.dotfiles"
+cd "$HOME/.dotfiles"
 ```
 
-Install [doti](https://github.com/volcmen/doti), then initialize:
+Run the repository-native workflow in order:
 
 ```bash
-cd ~/Development/personal/configs
-doti init
+./bin/dotfiles detect
+./bin/dotfiles check
+./bin/dotfiles diff
+./bin/dotfiles install
+./bin/dotfiles install --apply --backup
 ```
 
-See the [doti repo](https://github.com/volcmen/doti) for full documentation.
+The first four commands are read-only. Plain `install` only prints a plan.
+Only an `install` command containing `--apply` can change `$HOME`; the final
+command above explicitly applies the accepted plan and backs up eligible
+conflicts.
+
+## Detect and check
+
+`detect` prints `macos` or `arch` for the physical host and rejects unsupported
+systems. A target override cannot change physical-host installation
+eligibility.
+
+```bash
+./bin/dotfiles detect
+./bin/dotfiles check
+./bin/dotfiles check --target arch
+```
+
+`check` validates the manifest, source safety, syntax, and available native
+validators. Its confidence labels are deliberately distinct:
+
+- `PASS`: applicable validation ran on the physical host.
+- `STATIC PASS`: off-platform syntax or structure passed.
+- `RUNTIME UNVERIFIED`: a native binary, safe candidate-file check, or real
+  session is still required.
+- `BLOCKED`: an unsafe source or actual validation failure must be resolved.
+
+`--target` and `DOTFILES_TARGET=macos|arch` affect read-only validation only.
+They never authorize an install for another platform.
+
+## Preview and install
+
+Inspect live drift and the complete installation plan before applying it:
+
+```bash
+./bin/dotfiles diff
+./bin/dotfiles install
+```
+
+`diff` classifies each selected path and may exit nonzero for ordinary drift.
+Plain `install` prints `CREATE`, `NOOP`, `CONFLICT`, `BACKUP`, or `BLOCKED`
+actions without writing anything. It validates the complete plan before any
+mutation.
+
+Apply only after reviewing the plan:
+
+```bash
+./bin/dotfiles install --apply --backup
+```
+
+`--backup` is valid only after `--apply`. With it, regular-file and foreign
+symlink conflicts are moved into one backup set before absolute links to this
+checkout are created. Directory/type conflicts remain blocked even with
+`--backup`. `install --apply` without `--backup` can link missing targets but
+refuses existing regular files and foreign links.
+
+No install command runs a package manager, changes the login shell, enables a
+service, or reloads Kitty, Zellij, Hyprland, Waybar, or any other process.
+
+## Backups and recovery
+
+Backup sets are created under:
+
+```text
+${XDG_STATE_HOME:-$HOME/.local/state}/dotfiles/backups/<UTC timestamp>-<pid>/
+```
+
+Each set contains `files/`, preserving paths relative to `$HOME`, and a
+tab-separated `report.tsv`. `MOVE` rows record the relative path, original live
+target, and backup path. `LINK` rows record the relative path, canonical source,
+and installed target. An unexpected failure during the same transaction
+triggers automatic rollback; a completed install is recovered manually from
+its backup set.
+
+For manual recovery:
+
+1. Stop using the affected application and inspect `report.tsv`.
+2. For each `MOVE` row, verify that the current target is still the symlink
+   recorded by its matching `LINK` row. If it changed after installation, stop
+   instead of overwriting it.
+3. Remove only that verified installed symlink, then move the corresponding
+   file from `files/<relative-path>` back to the original target shown in the
+   report.
+4. Run `./bin/dotfiles diff` again to inspect the recovered state.
+
+There is no automated restore subcommand. Keep the report with the backup so
+recovery does not depend on this checkout remaining available.
+
+## Using doti
+
+[doti](https://github.com/volcmen/doti) remains an optional alternative. Point
+it at this repository using doti's documented workflow: the same `home/`
+directory is its home mirror, so no generated copy or platform overlay is
+needed. Do not manage the same live target concurrently with doti and
+`./bin/dotfiles`; preview with one owner and understand its backup behavior
+before applying.
+
+## Updating versions
+
+`dotfiles.manifest` records the last version against which each source was
+reviewed, not an online latest release. Package upgrades are always manual:
+
+1. Upgrade with the host's normal package tooling outside this repository.
+2. Record the exact installed version and review upstream application
+   documentation.
+3. Add a failing regression test for any required config change, make the
+   smallest behavior-preserving edit, and run the native validator.
+4. Update `tested_version` only after that evidence exists, then run
+   `bash tests/dotfiles-test.sh` and `./bin/dotfiles check`.
+
+The vendored Yazi recycle-bin plugin follows the same deliberate review flow;
+it is never fetched or updated automatically.
+
+## Arch/Hyprland runtime verification
+
+macOS can statically inspect Arch sources, but it cannot prove an Arch
+Hyprland session. On the actual Arch machine, from this checkout, run the
+read-only gate first:
+
+```bash
+./bin/dotfiles detect
+./bin/dotfiles check --target arch
+./bin/dotfiles diff
+./bin/dotfiles install
+hyprctl configerrors
+fuzzel --check-config --config="$PWD/home/.config/fuzzel/fuzzel.ini"
+zellij --config "$PWD/home/.config/zellij/config.kdl" setup --check
+```
+
+Record the installed Hyprland, hyprpaper, hypridle, hyprlock, hyprsunset,
+Waybar, Fuzzel, Mako, and UWSM versions. Resolve only observed failures, rerun
+the checks, and manually verify bindings, layout, theme, rules, startup,
+idle/lock/DPMS, launcher, notifications, portal, terminal, and clipboard
+behavior. Keep every unobserved item `RUNTIME UNVERIFIED`.
+
+The tool never reloads Hyprland or services. Apply only after the read-only
+results and runtime checks are accepted, using the explicit backup command from
+the previous section.
