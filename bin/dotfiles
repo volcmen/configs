@@ -382,15 +382,28 @@ validate_toml() {
     python3 -c 'import sys,tomllib; f=open(sys.argv[1], "rb"); tomllib.load(f); f.close()' "$file"
 }
 
+fuzzel_command_available() {
+    if [[ ${DOTFILES_TESTING:-0} == 1 && ${DOTFILES_TEST_FUZZEL_UNAVAILABLE:-0} == 1 ]]; then
+        return 1
+    fi
+    command -v fuzzel >/dev/null 2>&1
+}
+
 run_validator() {
-    local id=$1 file=$2 target=$3
+    local id=$1 file=$2 target=$3 validator_status
     case "$id" in
         plain) return 0 ;;
         shell) bash -n "$file" ;;
         fish) command -v fish >/dev/null 2>&1 || return 125; fish -n "$file" ;;
         fuzzel)
-            command -v fuzzel >/dev/null 2>&1 || return 125
-            fuzzel --check-config --config="$file"
+            fuzzel_command_available || return 125
+            if fuzzel --check-config --config="$file"; then
+                return 0
+            else
+                validator_status=$?
+            fi
+            [[ $validator_status -ne 125 ]] || return 1
+            return "$validator_status"
             ;;
         git) command -v git >/dev/null 2>&1 || return 125; git config --file "$file" --list >/dev/null ;;
         lua|hyprland-lua) command -v luac >/dev/null 2>&1 || return 125; luac -p "$file" ;;
@@ -466,7 +479,14 @@ observe_installed_version() {
             electron) set -- electron --version ;;
             fish) set -- fish --version ;;
             fontconfig) set -- fc-list --version ;;
-            fuzzel) set -- fuzzel --version ;;
+            fuzzel)
+                if fuzzel_command_available; then
+                    set -- fuzzel --version
+                else
+                    value=unavailable
+                    set --
+                fi
+                ;;
             git) set -- git --version ;;
             hypridle) set -- hypridle --version ;;
             hyprland) set -- Hyprland --version ;;

@@ -59,6 +59,7 @@ run_cli() {
         DOTFILES_TEST_MOVE_COMMAND="${DOTFILES_TEST_MOVE_COMMAND:-}" \
         DOTFILES_TEST_REPORT_PARTIAL_TYPE="${DOTFILES_TEST_REPORT_PARTIAL_TYPE:-}" \
         DOTFILES_TEST_REPORT_FINAL_UNLINK="${DOTFILES_TEST_REPORT_FINAL_UNLINK:-}" \
+        DOTFILES_TEST_FUZZEL_UNAVAILABLE="${DOTFILES_TEST_FUZZEL_UNAVAILABLE:-}" \
         PATH="${DOTFILES_TEST_PATH:-$PATH}" \
         "$TEST_TMP/repo/bin/dotfiles" "$@" 2>&1)"; then
         CLI_STATUS=0
@@ -545,32 +546,77 @@ STUB
 }
 
 test_fuzzel_missing_binary_is_visible_and_nonblocking() {
-    local empty_bin
+    local validator_bin
     new_fixture
-    empty_bin="$TEST_TMP/empty-bin"
-    mkdir -p "$empty_bin" "$TEST_TMP/repo/home/.config/fuzzel"
+    validator_bin="$TEST_TMP/validator-bin"
+    mkdir -p "$validator_bin" "$TEST_TMP/repo/home/.config/fuzzel"
     printf '[main]\nfont=monospace\n' >"$TEST_TMP/repo/home/.config/fuzzel/fuzzel.ini"
     write_manifest 'fuzzel|arch|file|.config/fuzzel/fuzzel.ini|fuzzel|yes|unverified'
     write_os_release 'ID=arch'
+    cat >"$validator_bin/fuzzel" <<STUB
+#!/bin/sh
+: >"$TEST_TMP/fuzzel-unexpectedly-executed"
+exit 0
+STUB
+    chmod +x "$validator_bin/fuzzel"
 
     DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" \
-        DOTFILES_TEST_PATH="$empty_bin:/usr/bin:/bin" run_cli check --target arch
+        DOTFILES_TEST_FUZZEL_UNAVAILABLE=1 DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" \
+        run_cli check --target arch
     assert_status 0 && \
         assert_contains 'RUNTIME UNVERIFIED fuzzel .config/fuzzel/fuzzel.ini: validator unavailable or intentionally unsafe on arch' || return 1
+    assert_not_exists "$TEST_TMP/fuzzel-unexpectedly-executed" || return 1
 
     DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" \
-        DOTFILES_TEST_PATH="$empty_bin:/usr/bin:/bin" run_cli install
+        DOTFILES_TEST_FUZZEL_UNAVAILABLE=1 DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" \
+        run_cli install
     assert_status 0 && \
         assert_contains 'CREATE fuzzel .config/fuzzel/fuzzel.ini' && \
         assert_contains 'RUNTIME UNVERIFIED fuzzel .config/fuzzel/fuzzel.ini: validator unavailable or intentionally unsafe on arch' || return 1
     assert_not_exists "$TEST_TMP/home/.config/fuzzel/fuzzel.ini" || return 1
     assert_not_exists "$TEST_TMP/state" || return 1
+    assert_not_exists "$TEST_TMP/fuzzel-unexpectedly-executed" || return 1
 
     DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" \
-        DOTFILES_TEST_PATH="$empty_bin:/usr/bin:/bin" run_cli install --apply
+        DOTFILES_TEST_FUZZEL_UNAVAILABLE=1 DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" \
+        run_cli install --apply
     assert_status 0 && \
         assert_contains 'RUNTIME UNVERIFIED fuzzel .config/fuzzel/fuzzel.ini: validator unavailable or intentionally unsafe on arch' || return 1
+    assert_not_exists "$TEST_TMP/fuzzel-unexpectedly-executed" || return 1
     [[ "$(readlink "$TEST_TMP/home/.config/fuzzel/fuzzel.ini")" == "$TEST_TMP/repo/home/.config/fuzzel/fuzzel.ini" ]]
+}
+
+test_fuzzel_unavailable_test_seam_is_ignored_in_production() {
+    local validator_bin output status
+    new_fixture
+    validator_bin="$TEST_TMP/validator-bin"
+    mkdir -p "$validator_bin" "$TEST_TMP/repo/home/.config/fuzzel"
+    printf '[main]\nfont=monospace\n' >"$TEST_TMP/repo/home/.config/fuzzel/fuzzel.ini"
+    write_manifest 'fuzzel|arch|file|.config/fuzzel/fuzzel.ini|fuzzel|yes|unverified'
+    cat >"$validator_bin/fuzzel" <<STUB
+#!/bin/sh
+if [ "\${1:-}" = --version ]; then
+    printf 'fuzzel version 1.11.1\n'
+    exit 0
+fi
+printf '%s\n' "\$*" >"$TEST_TMP/fuzzel-production-call"
+exit 0
+STUB
+    chmod +x "$validator_bin/fuzzel"
+
+    if output="$(DOTFILES_TESTING=0 DOTFILES_TEST_FUZZEL_UNAVAILABLE=1 \
+        PATH="$validator_bin:/usr/bin:/bin" \
+        "$TEST_TMP/repo/bin/dotfiles" check --target arch 2>&1)"; then
+        status=0
+    else
+        status=$?
+    fi
+    [[ "$status" -eq 0 ]] || fail "production ignored-seam check failed: $output" || return 1
+    [[ "$output" == *'PASS fuzzel .config/fuzzel/fuzzel.ini: syntax validated'* ]] || \
+        fail "production honored test-only Fuzzel seam: $output" || return 1
+    [[ "$(<"$TEST_TMP/fuzzel-production-call")" == \
+        "--check-config --config=$TEST_TMP/repo/home/.config/fuzzel/fuzzel.ini" ]] || \
+        fail 'production did not execute the available Fuzzel validator'
 }
 
 test_fuzzel_failure_blocks_check_and_install_before_any_mutation() {
@@ -625,6 +671,60 @@ STUB
     assert_not_exists "$TEST_TMP/state" || return 1
     assert_not_exists "$TEST_TMP/outside-mutated" || return 1
     [[ "$(wc -l <"$TEST_TMP/fuzzel-check-calls")" -eq 3 ]]
+}
+
+test_fuzzel_executed_exit_125_blocks_before_any_mutation() {
+    local validator_bin install_hook
+    new_fixture
+    validator_bin="$TEST_TMP/validator-bin"
+    install_hook="$TEST_TMP/install-hook"
+    mkdir -p "$validator_bin" "$TEST_TMP/repo/home/.config/fuzzel"
+    printf '[main]\nfont=monospace\n' >"$TEST_TMP/repo/home/.config/fuzzel/fuzzel.ini"
+    write_manifest 'fuzzel|arch|file|.config/fuzzel/fuzzel.ini|fuzzel|yes|unverified'
+    write_os_release 'ID=arch'
+    cat >"$validator_bin/fuzzel" <<STUB
+#!/bin/sh
+if [ "\${1:-}" = --version ]; then
+    printf 'fuzzel version 1.11.1\n'
+    exit 0
+fi
+printf '%s\n' "\$*" >>"$TEST_TMP/fuzzel-125-calls"
+printf 'executed validator returned 125\n' >&2
+exit 125
+STUB
+    cat >"$install_hook" <<STUB
+#!/bin/sh
+: >"$TEST_TMP/outside-mutated"
+STUB
+    chmod +x "$validator_bin/fuzzel" "$install_hook"
+
+    DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" \
+        DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" DOTFILES_TEST_INSTALL_HOOK="$install_hook" \
+        run_cli check --target arch
+    assert_status 1 && \
+        assert_contains 'BLOCKED fuzzel .config/fuzzel/fuzzel.ini: executed validator returned 125' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/fuzzel/fuzzel.ini" || return 1
+    assert_not_exists "$TEST_TMP/state" || return 1
+    assert_not_exists "$TEST_TMP/outside-mutated" || return 1
+
+    DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" \
+        DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" DOTFILES_TEST_INSTALL_HOOK="$install_hook" \
+        run_cli install
+    assert_status 65 && \
+        assert_contains 'BLOCKED fuzzel .config/fuzzel/fuzzel.ini: executed validator returned 125' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/fuzzel/fuzzel.ini" || return 1
+    assert_not_exists "$TEST_TMP/state" || return 1
+    assert_not_exists "$TEST_TMP/outside-mutated" || return 1
+
+    DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" \
+        DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" DOTFILES_TEST_INSTALL_HOOK="$install_hook" \
+        run_cli install --apply
+    assert_status 65 && \
+        assert_contains 'BLOCKED fuzzel .config/fuzzel/fuzzel.ini: executed validator returned 125' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/fuzzel/fuzzel.ini" || return 1
+    assert_not_exists "$TEST_TMP/state" || return 1
+    assert_not_exists "$TEST_TMP/outside-mutated" || return 1
+    [[ "$(wc -l <"$TEST_TMP/fuzzel-125-calls")" -eq 3 ]]
 }
 
 test_check_missing_source_uses_required_semantics() {
@@ -4093,16 +4193,18 @@ test_focused_test_selection_rejects_unknown_names_and_runs_known_once() {
 }
 
 test_fixture_setup_failures_never_retarget_cleanup() {
-    local kind sandbox stub_bin output status
+    local kind sandbox stub_bin bash_env output status
     new_fixture
 
-    for kind in mktemp cd mkdir cp; do
+    for kind in mktemp cd mkdir cp chmod; do
         sandbox="$TEST_TMP/harness-$kind"
         stub_bin="$sandbox/stub-bin"
+        bash_env="$sandbox/bash-env"
         mkdir -p "$sandbox/tests" "$sandbox/bin" "$stub_bin"
         cp "$PROJECT_ROOT/tests/dotfiles-test.sh" "$sandbox/tests/dotfiles-test.sh"
         cp "$PROJECT_ROOT/bin/dotfiles" "$sandbox/bin/dotfiles"
         printf 'preserve me\n' >"$sandbox/sentinel"
+        : >"$bash_env"
         case "$kind" in
             mktemp)
                 cat >"$stub_bin/mktemp" <<'STUB'
@@ -4113,9 +4215,16 @@ STUB
             cd)
                 cat >"$stub_bin/mktemp" <<STUB
 #!/bin/sh
-/bin/mkdir -p "$sandbox/inaccessible-fixture"
-/bin/chmod 000 "$sandbox/inaccessible-fixture"
-printf '%s\n' "$sandbox/inaccessible-fixture"
+/bin/mkdir -p "$sandbox/fixture"
+printf '%s\n' "$sandbox/fixture"
+STUB
+                cat >"$bash_env" <<STUB
+cd() {
+    if [ "\$#" -eq 1 ] && [ "\$1" = "$sandbox/fixture" ]; then
+        return 73
+    fi
+    builtin cd "\$@"
+}
 STUB
                 ;;
             mkdir)
@@ -4140,17 +4249,25 @@ STUB
 exit 73
 STUB
                 ;;
+            chmod)
+                cat >"$stub_bin/mktemp" <<STUB
+#!/bin/sh
+/bin/mkdir -p "$sandbox/fixture"
+printf '%s\n' "$sandbox/fixture"
+STUB
+                cat >"$stub_bin/chmod" <<'STUB'
+#!/bin/sh
+exit 73
+STUB
+                ;;
         esac
         chmod +x "$stub_bin"/*
 
-        if output="$(cd "$sandbox" && PATH="$stub_bin:/usr/bin:/bin" \
+        if output="$(cd "$sandbox" && BASH_ENV="$bash_env" PATH="$stub_bin:/usr/bin:/bin" \
             /bin/bash "$sandbox/tests/dotfiles-test.sh" test_help 2>&1)"; then
             status=0
         else
             status=$?
-        fi
-        if [[ "$kind" == cd && -d "$sandbox/inaccessible-fixture" ]]; then
-            /bin/chmod 700 "$sandbox/inaccessible-fixture" || return 1
         fi
         [[ "$status" -ne 0 ]] || fail "$kind fixture failure unexpectedly passed: $output" || return 1
         [[ "$output" == *"unable to create isolated test fixture ($kind)"* ]] || \
@@ -4239,7 +4356,9 @@ run_test test_check_sanitizes_validator_control_diagnostics
 run_test test_check_never_executes_manifest_validator_text
 run_test test_fuzzel_manifest_routes_exact_native_candidate_argv
 run_test test_fuzzel_missing_binary_is_visible_and_nonblocking
+run_test test_fuzzel_unavailable_test_seam_is_ignored_in_production
 run_test test_fuzzel_failure_blocks_check_and_install_before_any_mutation
+run_test test_fuzzel_executed_exit_125_blocks_before_any_mutation
 run_test test_check_missing_source_uses_required_semantics
 run_test test_check_reports_reviewed_and_safe_installed_versions
 run_test test_check_version_observation_is_not_applicable_off_platform
