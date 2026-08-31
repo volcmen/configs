@@ -78,7 +78,7 @@ remain excluded.
 | --- | --- | --- |
 | Required | Four tracked Kitty/Zellij files differed from the live macOS files. | Reconciled deliberately in `fdc7cd1`; exact paths and changes are recorded below. |
 | Required | Shared clipboard commands were platform-specific. | Zellij now calls `dotfiles-copy`; Yazi uses its native Linux/macOS selectors. Automated tests cover both dispatch paths. |
-| Required | Hyprland Lua-era animation/dispatcher syntax and UWSM logout needed the reviewed forms. | Animation selectors use `bezier` for the existing Bézier names and `spring` for the existing `easy` spring; DPMS/workspace commands use the Lua dispatchers; logout uses `uwsm stop`. The selector correction is grounded in the [Hyprland 0.56.2 Lua binding](https://github.com/hyprwm/Hyprland/blob/v0.56.2/src/config/lua/bindings/LuaBindingsConfigRules.cpp#L400-L423) and [0.56.2 example](https://github.com/hyprwm/Hyprland/blob/v0.56.2/example/hyprland.lua#L134-L150). No reload was run. See also the [Hyprland animation guide](https://wiki.hypr.land/configuring/core/animations/) and [start guide](https://wiki.hypr.land/Configuring/Start/). |
+| Required | Hyprland Lua-era animation/dispatcher syntax and UWSM logout needed the reviewed forms. | Animation selectors use `bezier` for the existing Bézier names and `spring` for the existing `easy` spring; DPMS/workspace commands use the Lua dispatchers; logout uses `uwsm stop`. The selector correction is grounded in the [Hyprland 0.56.2 Lua binding](https://github.com/hyprwm/Hyprland/blob/v0.56.2/src/config/lua/bindings/LuaBindingsConfigRules.cpp#L428-L453) and [0.56.2 example](https://github.com/hyprwm/Hyprland/blob/v0.56.2/example/hyprland.lua#L134-L150). No reload was run. See also the [Hyprland animation guide](https://wiki.hypr.land/configuring/core/animations/) and [start guide](https://wiki.hypr.land/Configuring/Start/). |
 | Recommended | Optional Fish tools and the Homebrew path needed explicit availability guards. | Guards were added in `e651449` without changing successful initialization order. |
 | Recommended | The inactive Fontconfig alternative obscured canonical ownership. | Decision and exact evidence are recorded in the Fontconfig section below. |
 | Optional | Theme, fonts, spacing, layouts, animations, bindings, and startup workflow redesigns. | Excluded. Existing user-visible values and behavior-sensitive files were preserved. |
@@ -173,8 +173,9 @@ zellij --config "$PWD/home/.config/zellij/config.kdl" setup --check
 The preview is accepted only when `detect` reports `arch`; `diff` and the dry-run
 `install` contain only expected Arch/shared deployment decisions and no
 macOS-only decisions; Fuzzel and Zellij both exit 0; and
-`hyprctl configerrors` is empty or contains only explicitly documented
-pre-existing errors. That result describes the current live session only;
+`hyprctl configerrors` output is byte-empty. Any output, including documented
+or pre-existing diagnostics, blocks acceptance. That result describes the
+current live session only;
 canonical candidates remain runtime-unverified until loaded provenance and
 freshness are demonstrated. Every proposed drift, missing path, creation, or
 backup must be understood and accepted before applying.
@@ -203,8 +204,8 @@ uwsm --version
 Only after the preview is accepted, run
 `./bin/dotfiles install --apply --backup`; confirm it creates one recoverable
 backup set, creates only the selected Arch/shared links, and performs no service
-or compositor action. Then confirm there are no new `hyprctl configerrors` and
-manually verify the existing app, clipboard, group, media, mouse, tiling,
+or compositor action. Then confirm `hyprctl configerrors` is still byte-empty
+and manually verify the existing app, clipboard, group, media, mouse, tiling,
 workspace, resize, and lock bindings; Waybar modules, style, and power menu;
 wallpaper, idle/DPMS/suspend, lock screen, blue-light, clipboard-history,
 launcher, portal, and notification behavior; Zellij `Alt 1..0`, `Alt d/u`, and

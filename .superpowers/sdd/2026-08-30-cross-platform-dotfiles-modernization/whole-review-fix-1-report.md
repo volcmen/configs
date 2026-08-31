@@ -18,7 +18,7 @@ Hyprland:
    once as a global live-session `BLOCKED` result.
 
 The corrected selector contract is grounded in Hyprland 0.56.2's
-[`hl.animation` binding](https://github.com/hyprwm/Hyprland/blob/v0.56.2/src/config/lua/bindings/LuaBindingsConfigRules.cpp#L400-L423),
+[`hl.animation` binding](https://github.com/hyprwm/Hyprland/blob/v0.56.2/src/config/lua/bindings/LuaBindingsConfigRules.cpp#L428-L453),
 the pinned [0.56.2 example](https://github.com/hyprwm/Hyprland/blob/v0.56.2/example/hyprland.lua#L134-L150),
 and the [animation guide](https://wiki.hypr.land/configuring/core/animations/).
 
@@ -189,3 +189,34 @@ efaf26481d442ef1d9712b85d88b96d79cb107f90ba95320a1e6d426678a4efd  home/.config/h
 - Current online wiki prose contains a generic `curve` schema example alongside
   `bezier`/`spring` examples. The pinned 0.56.2 implementation and pinned
   example are the authority used here.
+
+## Review round 1/5
+
+The follow-up review found that the operator gates still allowed documented
+pre-existing `hyprctl configerrors`, although the implementation correctly
+blocks on every nonempty byte sequence. The plan and audit now require
+byte-empty output both before acceptance and after apply; “no new errors” is no
+longer sufficient. Candidate files remain `RUNTIME UNVERIFIED`, and the probe
+remains scoped to the global live session.
+
+The Hyprland binding citation was also corrected from the earlier range to the
+actual selector-parsing lines 428–453 in the audit and this report.
+
+Verification evidence:
+
+```text
+bash tests/dotfiles-test.sh test_documentation_records_operations_and_compatibility_evidence
+1 passed; 0 failed
+
+bash tests/dotfiles-test.sh
+81 passed; 0 failed
+
+rg stale acceptance exceptions and source anchors
+0 matches
+
+git diff --check
+exit 0
+```
+
+This round changed documentation only. It did not modify code or tests and did
+not run apply, install mutation, or reload commands.

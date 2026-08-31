@@ -1564,8 +1564,9 @@ zellij --config "$PWD/home/.config/zellij/config.kdl" setup --check
 ```
 
 Expected: `detect` prints `arch`; no macOS-only deployment decisions; Fuzzel and
-Zellij exit `0`; `hyprctl configerrors` is empty or contains only documented
-pre-existing errors. This is global running-session evidence, not proof that
+Zellij exit `0`; `hyprctl configerrors` output is byte-empty. Any output,
+including documented or pre-existing diagnostics, blocks acceptance. This is
+global running-session evidence, not proof that
 any canonical candidate was loaded or is fresh. Do not reload Hyprland.
 
 - [ ] **Step 2: Record actual Arch versions and resolve only verified defects**
@@ -1602,7 +1603,7 @@ or compositor action.
 
 Verify and record:
 
-- Hyprland reports no new config errors;
+- `hyprctl configerrors` output is byte-empty;
 - canonical candidates remain runtime-unverified until loaded provenance and
   freshness are established;
 - all existing app, clipboard, group, media, mouse, tiling, workspace, resize,
