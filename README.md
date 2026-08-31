@@ -157,9 +157,23 @@ arrivals, and reports the last identity-validated recovery location rather
 than deleting without proof.
 
 The report is created without clobbering and retained by an open file handle for
-the whole transaction. Location updates append records through that handle; they
-never reopen or truncate the report pathname. A failed or partial append leaves
-all earlier complete recovery records intact and makes the transaction fail.
+the whole transaction. A separately pinned hardlink under the transaction
+directory keeps the same report inode recoverable if the public name is
+unlinked. On failure, `REPORT_RECOVERY` identifies that link's last
+identity-validated physical location; on verified success the exact owned link
+is removed before transaction storage is pruned. Location updates append records
+through the retained handle; they never reopen or truncate the report pathname.
+Hooks, primitive test seams, and non-writer filesystem children run with the
+report descriptor closed, so neither a hook nor a surviving descendant can
+modify or keep the handle alive. A failed or partial append leaves all earlier
+complete recovery records intact and makes the transaction fail.
+
+After each no-clobber move, ownership is classified from the stable inode and
+fingerprint actually present at the destination or source after the system call,
+not only from observations made before entering `mv`. Unexpected regular files,
+symlinks, and directories are restored no-clobber when possible; otherwise they
+remain unowned, retain an identity-validated recovery location, and are never
+removed by rollback.
 
 For manual recovery:
 

@@ -29,7 +29,9 @@ INSTALL_ROOT_PHYSICAL=''; INSTALL_ROOT_IDENTITY=''
 PINNED_INSTALL_PATH=(); PINNED_INSTALL_PHYSICAL=(); PINNED_INSTALL_IDENTITY=(); PINNED_INSTALL_COUNT=0
 LOCK_PATH='install.lock'; LOCK_HELD=0
 TRANSACTION_ROOT=''; QUARANTINE_ROOT=''; BACKUP_ROOT=''; BACKUP_FILES=''; REPORT_PATH=''
-REPORT_IDENTITY=''; REPORT_FD_OPEN=0; REPORT_WRITE_FAILED=0
+REPORT_IDENTITY=''; REPORT_RECOVERY_PATH=''; REPORT_RECOVERY_IDENTITY=''
+REPORT_RECOVERY_PARENT_PHYSICAL=''; REPORT_RECOVERY_PARENT_IDENTITY=''
+REPORT_FD_OPEN=0; REPORT_WRITE_FAILED=0
 REPORT_EXPECTED_ROW=(); REPORT_EXPECTED_COUNT=0
 JOURNAL_TYPE=(); JOURNAL_RELATIVE=(); JOURNAL_FIRST=(); JOURNAL_SECOND=(); JOURNAL_IDENTITY=()
 JOURNAL_ORIGINAL_IDENTITY=()
@@ -47,6 +49,7 @@ JOURNAL_COUNT=0; MUTATION_COUNT=0; TEST_FAIL_AFTER=''; PRECOMMIT_CLEANUP_HOOK_RA
 TRANSACTION_ACTIVE=0; CLEANUP_ACTIVE=0; PENDING_SIGNAL=0; TRANSACTION_OWNER_PID=$$
 TRANSACTION_STAT_STYLE=''; TRANSACTION_STAT_COMMAND=''
 TRANSACTION_MOVE_STYLE=''; TRANSACTION_MOVE_COMMAND=''
+TRANSACTION_LINK_COMMAND=''
 MOVE_RESULT_PATH=''; MOVE_RESULT_PARENT_PHYSICAL=''; MOVE_RESULT_PARENT_IDENTITY=''
 MOVE_RESULT_IDENTITY=''; MOVE_RESULT_FINGERPRINT=''
 HYPRLAND_RUNTIME_PROBED=0; HYPRLAND_RUNTIME_STATUS=125; HYPRLAND_RUNTIME_DETAIL=''
@@ -164,8 +167,10 @@ test_value() {
 install_test_hook() {
     [[ ${DOTFILES_TESTING:-0} == 1 && -n ${DOTFILES_TEST_INSTALL_HOOK:-} ]] || return 0
     [[ -x "$DOTFILES_TEST_INSTALL_HOOK" ]] || return 1
-    "$DOTFILES_TEST_INSTALL_HOOK" "$@"
+    "$DOTFILES_TEST_INSTALL_HOOK" "$@" 9>&-
 }
+
+run_without_report_fd() { "$@" 9>&-; }
 
 kernel_name() {
     local value
@@ -256,7 +261,7 @@ path_within() {
 safe_source() {
     local source=$1 parent
     [[ -f "$source" && ! -L "$source" ]] || return 1
-    parent=$(physical_dir "$(dirname "$source")") || return 1
+    parent=$(physical_dir "$(run_without_report_fd dirname "$source")") || return 1
     path_within "$parent" "$SOURCE_ROOT"
 }
 
@@ -321,12 +326,12 @@ artifact_status() {
     local source=$1 target=$2 link
     safe_source "$source" && safe_target "$target" || { printf 'BLOCKED\n'; return; }
     if [[ -L "$target" ]]; then
-        link=$(readlink "$target")
+        link=$(run_without_report_fd readlink "$target")
         [[ "$link" == "$source" ]] && printf 'LINKED\n' || printf 'FOREIGN_LINK\n'
     elif [[ -d "$target" ]]; then
         printf 'TYPE_CONFLICT\n'
     elif [[ -f "$target" ]]; then
-        cmp -s "$source" "$target" && printf 'MATCH\n' || printf 'DRIFT\n'
+        run_without_report_fd cmp -s "$source" "$target" && printf 'MATCH\n' || printf 'DRIFT\n'
     elif [[ -e "$target" ]]; then
         printf 'TYPE_CONFLICT\n'
     else
@@ -894,7 +899,9 @@ reset_transaction_journal() {
     MUTATION_COUNT=0
     PENDING_SIGNAL=0
     PRECOMMIT_CLEANUP_HOOK_RAN=0
-    REPORT_PATH=''; REPORT_IDENTITY=''; REPORT_FD_OPEN=0; REPORT_WRITE_FAILED=0
+    REPORT_PATH=''; REPORT_IDENTITY=''; REPORT_RECOVERY_PATH=''; REPORT_RECOVERY_IDENTITY=''
+    REPORT_RECOVERY_PARENT_PHYSICAL=''; REPORT_RECOVERY_PARENT_IDENTITY=''
+    REPORT_FD_OPEN=0; REPORT_WRITE_FAILED=0
     REPORT_EXPECTED_ROW=(); REPORT_EXPECTED_COUNT=0
     TEST_FAIL_AFTER=''
     if [[ ${DOTFILES_TESTING:-0} == 1 ]]; then
@@ -909,8 +916,8 @@ reset_transaction_journal() {
 path_identity() {
     local identity
     case "$TRANSACTION_STAT_STYLE" in
-        bsd) identity=$("$TRANSACTION_STAT_COMMAND" -f '%d:%i' "$1" 2>/dev/null) || return 1 ;;
-        gnu) identity=$("$TRANSACTION_STAT_COMMAND" -c '%d:%i' -- "$1" 2>/dev/null) || return 1 ;;
+        bsd) identity=$(run_without_report_fd "$TRANSACTION_STAT_COMMAND" -f '%d:%i' "$1" 2>/dev/null) || return 1 ;;
+        gnu) identity=$(run_without_report_fd "$TRANSACTION_STAT_COMMAND" -c '%d:%i' -- "$1" 2>/dev/null) || return 1 ;;
         *) return 1 ;;
     esac
     [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
@@ -920,10 +927,10 @@ path_identity() {
 path_fingerprint() {
     local checksum link
     if [[ -L "$1" ]]; then
-        link=$(readlink "$1") || return 1
+        link=$(run_without_report_fd readlink "$1") || return 1
         printf 'L:%s\n' "$link"
     elif [[ -f "$1" ]]; then
-        checksum=$(cksum <"$1") || return 1
+        checksum=$(run_without_report_fd cksum <"$1") || return 1
         printf 'F:%s\n' "$checksum"
     else
         return 1
@@ -952,7 +959,7 @@ capture_move_candidate() (
     name=${candidate##*/}
     [[ "$parent" != "$candidate" ]] || parent=.
     cd -P -- "$parent" || return 1
-    parent_physical=$(/bin/pwd -P) || return 1
+    parent_physical=$(run_without_report_fd /bin/pwd -P) || return 1
     parent_identity=$(path_identity .) || return 1
     identity=$(path_identity "$name") || return 1
     fingerprint=$(move_artifact_fingerprint "$name") || return 1
@@ -961,9 +968,28 @@ capture_move_candidate() (
         "$parent_identity" "$identity" "$fingerprint"
 )
 
+capture_actual_move_candidate() (
+    local candidate=$1 parent name parent_physical parent_identity identity fingerprint
+    local current_identity current_fingerprint
+    [[ -e "$candidate" || -L "$candidate" ]] || return 1
+    identity=$(path_identity "$candidate") || return 1
+    fingerprint=$(move_artifact_fingerprint "$candidate") || return 1
+    parent=${candidate%/*}
+    name=${candidate##*/}
+    [[ "$parent" != "$candidate" ]] || parent=.
+    cd -P -- "$parent" || return 1
+    parent_physical=$(run_without_report_fd /bin/pwd -P) || return 1
+    parent_identity=$(path_identity .) || return 1
+    current_identity=$(path_identity "$name") || return 1
+    current_fingerprint=$(move_artifact_fingerprint "$name") || return 1
+    [[ "$current_identity" == "$identity" && "$current_fingerprint" == "$fingerprint" ]] || return 1
+    printf '%s\t%s\t%s\t%s\t%s\n' "$parent_physical/$name" "$parent_physical" \
+        "$parent_identity" "$current_identity" "$current_fingerprint"
+)
+
 select_transaction_primitives() {
-    local kernel stat_command move_command
-    kernel=$(/usr/bin/uname -s 2>/dev/null) || return 74
+    local kernel stat_command move_command link_command=/bin/link
+    kernel=$(run_without_report_fd /usr/bin/uname -s 2>/dev/null) || return 74
     if [[ ${DOTFILES_TESTING:-0} == 1 && -n ${DOTFILES_TEST_TRANSACTION_KERNEL:-} ]]; then
         kernel=$DOTFILES_TEST_TRANSACTION_KERNEL
     fi
@@ -988,8 +1014,10 @@ select_transaction_primitives() {
     fi
     [[ "$stat_command" == /* && -x "$stat_command" ]] || return 74
     [[ "$move_command" == /* && -x "$move_command" ]] || return 74
+    [[ "$link_command" == /* && -x "$link_command" ]] || return 74
     TRANSACTION_STAT_COMMAND=$stat_command
     TRANSACTION_MOVE_COMMAND=$move_command
+    TRANSACTION_LINK_COMMAND=$link_command
 }
 
 move_no_clobber_exact() {
@@ -1005,13 +1033,13 @@ move_no_clobber_exact() {
     MOVE_RESULT_FINGERPRINT=$observed_fingerprint
     command_status=0
     case "$TRANSACTION_MOVE_STYLE" in
-        bsd) "$TRANSACTION_MOVE_COMMAND" -h -n -- "$source" "$destination" || command_status=$? ;;
-        gnu) "$TRANSACTION_MOVE_COMMAND" -n -T -- "$source" "$destination" || command_status=$? ;;
+        bsd) run_without_report_fd "$TRANSACTION_MOVE_COMMAND" -h -n -- "$source" "$destination" || command_status=$? ;;
+        gnu) run_without_report_fd "$TRANSACTION_MOVE_COMMAND" -n -T -- "$source" "$destination" || command_status=$? ;;
         *) return 74 ;;
     esac
     [[ $command_status -eq 0 ]] || return "$command_status"
-    for candidate in "$destination" "$destination/${source##*/}" "$source"; do
-        info=$(capture_move_candidate "$candidate" "$observed_identity" "$observed_fingerprint") || info=''
+    for candidate in "$destination/${source##*/}" "$destination" "$source"; do
+        info=$(capture_actual_move_candidate "$candidate") || info=''
         [[ -n "$info" ]] || continue
         IFS=$'\t' read -r MOVE_RESULT_PATH MOVE_RESULT_PARENT_PHYSICAL MOVE_RESULT_PARENT_IDENTITY \
             MOVE_RESULT_IDENTITY MOVE_RESULT_FINGERPRINT <<<"$info"
@@ -1052,10 +1080,10 @@ recover_unowned_displaced() {
 
 pin_state_root() {
     STATE_ROOT=$(state_root) || return $?
-    mkdir -p -- "$STATE_ROOT" || return 74
+    run_without_report_fd mkdir -p -- "$STATE_ROOT" || return 74
     [[ -d "$STATE_ROOT" && ! -L "$STATE_ROOT" ]] || return 74
     cd -P -- "$STATE_ROOT" || return 74
-    STATE_ROOT_PHYSICAL=$(pwd -P) || return 74
+    STATE_ROOT_PHYSICAL=$(run_without_report_fd /bin/pwd -P) || return 74
     STATE_ROOT_IDENTITY=$(path_identity .) || return 74
 }
 
@@ -1074,7 +1102,7 @@ state_cwd_matches_pin() {
 
 refresh_state_physical_from_cwd() {
     state_cwd_matches_pin || return 74
-    STATE_ROOT_PHYSICAL=$(pwd -P) || return 74
+    STATE_ROOT_PHYSICAL=$(run_without_report_fd /bin/pwd -P) || return 74
 }
 
 state_physical_matches_pin() {
@@ -1103,7 +1131,7 @@ acquire_lock() {
     install_test_hook before_lock_acquire "$STATE_ROOT" || return $?
     honor_pending_signal || return $?
     state_cwd_matches_pin || return 74
-    if mkdir -- "$LOCK_PATH" 2>/dev/null; then
+    if run_without_report_fd mkdir -- "$LOCK_PATH" 2>/dev/null; then
         LOCK_HELD=1
     else
         printf '%s: another install is active: %s/install.lock\n' "$PROGRAM" "$STATE_ROOT" >&2
@@ -1118,7 +1146,7 @@ acquire_lock() {
 release_lock() {
     [[ "$LOCK_HELD" == 1 ]] || return 0
     state_cwd_matches_pin || return 74
-    if rmdir -- "$LOCK_PATH"; then
+    if run_without_report_fd rmdir -- "$LOCK_PATH"; then
         LOCK_HELD=0
         return 0
     fi
@@ -1129,25 +1157,25 @@ release_lock() {
 begin_transaction_storage() {
     local timestamp
     state_cwd_matches_pin && state_name_matches_pin || return 74
-    timestamp=$(date -u +%Y%m%dT%H%M%SZ) || return 74
-    mkdir -p -- transactions || return 74
+    timestamp=$(run_without_report_fd date -u +%Y%m%dT%H%M%SZ) || return 74
+    run_without_report_fd mkdir -p -- transactions || return 74
     TRANSACTION_ROOT="transactions/$timestamp-$$"
-    mkdir -- "$TRANSACTION_ROOT" || return 74
-    chmod 700 "$TRANSACTION_ROOT" || return 74
+    run_without_report_fd mkdir -- "$TRANSACTION_ROOT" || return 74
+    run_without_report_fd chmod 700 "$TRANSACTION_ROOT" || return 74
     QUARANTINE_ROOT="$TRANSACTION_ROOT/quarantine"
-    mkdir -- "$QUARANTINE_ROOT" || return 74
+    run_without_report_fd mkdir -- "$QUARANTINE_ROOT" || return 74
     honor_pending_signal || return $?
 }
 
 begin_backup() {
     local timestamp noclobber_was_set=0 open_status=0
     state_cwd_matches_pin && state_name_matches_pin || return 74
-    timestamp=$(date -u +%Y%m%dT%H%M%SZ) || return 74
-    mkdir -p -- backups || return 74
+    timestamp=$(run_without_report_fd date -u +%Y%m%dT%H%M%SZ) || return 74
+    run_without_report_fd mkdir -p -- backups || return 74
     BACKUP_ROOT="backups/$timestamp-$$"
-    mkdir -- "$BACKUP_ROOT" || return 74
+    run_without_report_fd mkdir -- "$BACKUP_ROOT" || return 74
     BACKUP_FILES="$BACKUP_ROOT/files"
-    mkdir -- "$BACKUP_FILES" || return 74
+    run_without_report_fd mkdir -- "$BACKUP_FILES" || return 74
     REPORT_PATH="$BACKUP_ROOT/report.tsv"
     [[ -o noclobber ]] && noclobber_was_set=1
     set -C
@@ -1158,6 +1186,15 @@ begin_backup() {
     [[ -f "$REPORT_PATH" && ! -L "$REPORT_PATH" ]] || return 74
     REPORT_IDENTITY=$(path_identity "$REPORT_PATH") || return 74
     [[ -n "$REPORT_IDENTITY" ]] || return 74
+    REPORT_RECOVERY_PARENT_PHYSICAL="$STATE_ROOT_PHYSICAL/$TRANSACTION_ROOT"
+    REPORT_RECOVERY_PARENT_IDENTITY=$(path_identity "$TRANSACTION_ROOT") || return 74
+    REPORT_RECOVERY_PATH="$REPORT_RECOVERY_PARENT_PHYSICAL/report-recovery.tsv"
+    [[ ! -e "$REPORT_RECOVERY_PATH" && ! -L "$REPORT_RECOVERY_PATH" ]] || return 74
+    install_test_hook report_recovery_before_link "$REPORT_RECOVERY_PATH" || return $?
+    run_without_report_fd "$TRANSACTION_LINK_COMMAND" "$REPORT_PATH" "$REPORT_RECOVERY_PATH" || return 74
+    [[ -f "$REPORT_RECOVERY_PATH" && ! -L "$REPORT_RECOVERY_PATH" ]] || return 74
+    REPORT_RECOVERY_IDENTITY=$(path_identity "$REPORT_RECOVERY_PATH") || return 74
+    [[ "$REPORT_RECOVERY_IDENTITY" == "$REPORT_IDENTITY" ]] || return 74
     honor_pending_signal || return $?
 }
 
@@ -1172,6 +1209,84 @@ report_path_matches_pin() {
     [[ -n "$REPORT_PATH" && -f "$REPORT_PATH" && ! -L "$REPORT_PATH" ]] || return 1
     identity=$(path_identity "$REPORT_PATH") || return 1
     [[ "$identity" == "$REPORT_IDENTITY" ]]
+}
+
+report_recovery_path_matches_pin() {
+    local identity
+    [[ -n "$REPORT_RECOVERY_PATH" && -f "$REPORT_RECOVERY_PATH" && ! -L "$REPORT_RECOVERY_PATH" ]] || return 1
+    identity=$(path_identity "$REPORT_RECOVERY_PATH") || return 1
+    [[ "$identity" == "$REPORT_RECOVERY_IDENTITY" && "$identity" == "$REPORT_IDENTITY" ]]
+}
+
+locate_report_recovery_link() (
+    local candidate identity parent_physical parent_identity match='' match_count=0
+    [[ -n "$REPORT_RECOVERY_PARENT_PHYSICAL" && -n "$REPORT_RECOVERY_PARENT_IDENTITY" && \
+        -n "$REPORT_RECOVERY_IDENTITY" ]] || return 1
+    [[ -d "$REPORT_RECOVERY_PARENT_PHYSICAL" && ! -L "$REPORT_RECOVERY_PARENT_PHYSICAL" ]] || return 1
+    cd -P -- "$REPORT_RECOVERY_PARENT_PHYSICAL" || return 1
+    parent_physical=$(run_without_report_fd /bin/pwd -P) || return 1
+    parent_identity=$(path_identity .) || return 1
+    [[ "$parent_identity" == "$REPORT_RECOVERY_PARENT_IDENTITY" ]] || return 1
+    shopt -s dotglob nullglob
+    for candidate in ./*; do
+        [[ -f "$candidate" && ! -L "$candidate" ]] || continue
+        identity=$(path_identity "$candidate") || continue
+        [[ "$identity" == "$REPORT_RECOVERY_IDENTITY" ]] || continue
+        match=${candidate#./}
+        match_count=$((match_count + 1))
+    done
+    [[ $match_count -eq 1 ]] || return 1
+    printf '%s\t%s\t%s\n' "$parent_physical/$match" "$parent_physical" "$parent_identity"
+)
+
+refresh_report_recovery_location() {
+    local previous_state_physical=$1 expected_name info actual parent_physical parent_identity
+    [[ -n "$REPORT_RECOVERY_IDENTITY" ]] || return 0
+    expected_name=${REPORT_RECOVERY_PATH##*/}
+    REPORT_RECOVERY_PATH=$(path_with_replaced_prefix "$REPORT_RECOVERY_PATH" \
+        "$previous_state_physical" "$STATE_ROOT_PHYSICAL") || return 74
+    REPORT_RECOVERY_PARENT_PHYSICAL=$(path_with_replaced_prefix "$REPORT_RECOVERY_PARENT_PHYSICAL" \
+        "$previous_state_physical" "$STATE_ROOT_PHYSICAL") || return 74
+    info=$(locate_report_recovery_link) || info=''
+    if [[ -z "$info" ]]; then
+        REPORT_RECOVERY_PATH=''
+        return 74
+    fi
+    IFS=$'\t' read -r actual parent_physical parent_identity <<<"$info"
+    REPORT_RECOVERY_PATH=$actual
+    REPORT_RECOVERY_PARENT_PHYSICAL=$parent_physical
+    REPORT_RECOVERY_PARENT_IDENTITY=$parent_identity
+    [[ "${actual##*/}" == "$expected_name" ]] || return 74
+}
+
+diagnose_report_recovery() {
+    local info physical parent_physical parent_identity
+    [[ -n "$REPORT_RECOVERY_IDENTITY" ]] || return 0
+    if ! report_recovery_path_matches_pin; then
+        info=$(locate_report_recovery_link) || info=''
+        if [[ -n "$info" ]]; then
+            IFS=$'\t' read -r REPORT_RECOVERY_PATH parent_physical parent_identity <<<"$info"
+            REPORT_RECOVERY_PARENT_PHYSICAL=$parent_physical
+            REPORT_RECOVERY_PARENT_IDENTITY=$parent_identity
+        fi
+    fi
+    if report_recovery_path_matches_pin; then
+        physical=$REPORT_RECOVERY_PATH
+        printf '%s: REPORT_RECOVERY location=%s identity=%s\n' "$PROGRAM" "$physical" \
+            "$REPORT_RECOVERY_IDENTITY" >&2
+    else
+        printf '%s: REPORT_RECOVERY path unavailable identity=%s\n' "$PROGRAM" \
+            "$REPORT_RECOVERY_IDENTITY" >&2
+    fi
+}
+
+remove_report_recovery_link() {
+    [[ -n "$REPORT_RECOVERY_PATH" ]] || return 0
+    state_cwd_matches_pin && report_path_matches_pin && report_recovery_path_matches_pin || return 74
+    run_without_report_fd /bin/unlink "$REPORT_RECOVERY_PATH" || return 74
+    [[ ! -e "$REPORT_RECOVERY_PATH" && ! -L "$REPORT_RECOVERY_PATH" ]] || return 74
+    REPORT_RECOVERY_PATH=''
+    REPORT_RECOVERY_IDENTITY=''
 }
 
 append_report() {
@@ -1219,8 +1334,11 @@ verify_report_postcondition() {
     [[ "$identity" == "$REPORT_IDENTITY" ]] || {
         printf '%s: backup report identity changed\n' "$PROGRAM" >&2; return 74;
     }
-    expected_checksum=$(expected_report_content | cksum) || return 74
-    actual_checksum=$(cksum <"$REPORT_PATH") || return 74
+    report_recovery_path_matches_pin || {
+        printf '%s: backup report recovery link identity changed\n' "$PROGRAM" >&2; return 74;
+    }
+    expected_checksum=$(expected_report_content | run_without_report_fd cksum) || return 74
+    actual_checksum=$(run_without_report_fd cksum <"$REPORT_PATH") || return 74
     [[ "$actual_checksum" == "$expected_checksum" ]] || {
         printf '%s: backup report content changed\n' "$PROGRAM" >&2; return 74;
     }
@@ -1417,13 +1535,19 @@ mark_journal_aux_unavailable() {
 
 locate_owned_artifact_from_cwd() {
     local expected_name=$1 expected_parent_identity=$2 expected_identity=$3 expected_fingerprint=$4
-    local current_parent current_parent_identity candidate candidate_name match='' match_count=0
-    current_parent=$(/bin/pwd -P) || return 1
+    local fingerprint_mode=${5:-owned} current_parent current_parent_identity candidate candidate_name
+    local observed_fingerprint match='' match_count=0
+    current_parent=$(run_without_report_fd /bin/pwd -P) || return 1
     current_parent_identity=$(path_identity .) || return 1
     [[ "$current_parent_identity" == "$expected_parent_identity" ]] || return 1
+    if [[ "$fingerprint_mode" == move ]]; then
+        observed_fingerprint=$(move_artifact_fingerprint "$expected_name" 2>/dev/null || true)
+    else
+        observed_fingerprint=$(path_fingerprint "$expected_name" 2>/dev/null || true)
+    fi
     if [[ ( -e "$expected_name" || -L "$expected_name" ) && \
         "$(path_identity "$expected_name" 2>/dev/null || true)" == "$expected_identity" && \
-        "$(path_fingerprint "$expected_name" 2>/dev/null || true)" == "$expected_fingerprint" ]]; then
+        "$observed_fingerprint" == "$expected_fingerprint" ]]; then
         printf '%s\t%s\t%s\t%s\n' "$current_parent/$expected_name" "$current_parent" \
             "$current_parent_identity" "$expected_name"
         return 0
@@ -1432,7 +1556,12 @@ locate_owned_artifact_from_cwd() {
     for candidate in ./*; do
         [[ -e "$candidate" || -L "$candidate" ]] || continue
         [[ "$(path_identity "$candidate" 2>/dev/null || true)" == "$expected_identity" ]] || continue
-        [[ "$(path_fingerprint "$candidate" 2>/dev/null || true)" == "$expected_fingerprint" ]] || continue
+        if [[ "$fingerprint_mode" == move ]]; then
+            observed_fingerprint=$(move_artifact_fingerprint "$candidate" 2>/dev/null || true)
+        else
+            observed_fingerprint=$(path_fingerprint "$candidate" 2>/dev/null || true)
+        fi
+        [[ "$observed_fingerprint" == "$expected_fingerprint" ]] || continue
         candidate_name=${candidate#./}
         match=$candidate_name
         match_count=$((match_count + 1))
@@ -1443,12 +1572,13 @@ locate_owned_artifact_from_cwd() {
 
 locate_recorded_artifact() (
     local path=$1 expected_parent_physical=$2 expected_parent_identity=$3 expected_identity=$4 expected_fingerprint=$5
-    local name
+    local fingerprint_mode=${6:-owned} name
     [[ -n "$path" && -n "$expected_parent_physical" && -n "$expected_parent_identity" && \
         -n "$expected_identity" && -n "$expected_fingerprint" ]] || return 1
     pin_rollback_target_parent "$path" "$path" "$expected_parent_physical" "$expected_parent_identity" 1 || return 1
     name=${path##*/}
-    locate_owned_artifact_from_cwd "$name" "$expected_parent_identity" "$expected_identity" "$expected_fingerprint"
+    locate_owned_artifact_from_cwd "$name" "$expected_parent_identity" "$expected_identity" \
+        "$expected_fingerprint" "$fingerprint_mode"
 )
 
 run_artifact_hook_with_refresh() (
@@ -1489,6 +1619,7 @@ refresh_journal_locations_after_hook() {
     local previous_state_physical=$1 i info actual actual_parent actual_parent_identity actual_name
     local publication_path aux_path unowned_path expected_name status=0
     refresh_state_physical_from_cwd || return 74
+    refresh_report_recovery_location "$previous_state_physical" || status=74
     for ((i=0; i<JOURNAL_COUNT; i++)); do
         publication_path=${JOURNAL_PUBLICATION[$i]}
         if [[ -n "$publication_path" ]]; then
@@ -1552,7 +1683,7 @@ refresh_journal_locations_after_hook() {
         if [[ -n "${JOURNAL_UNOWNED_IDENTITY[$i]}" && -n "${JOURNAL_UNOWNED[$i]}" ]]; then
             info=$(locate_recorded_artifact "${JOURNAL_UNOWNED[$i]}" \
                 "${JOURNAL_UNOWNED_PARENT_PHYSICAL[$i]}" "${JOURNAL_UNOWNED_PARENT_IDENTITY[$i]}" \
-                "${JOURNAL_UNOWNED_IDENTITY[$i]}" "${JOURNAL_UNOWNED_FINGERPRINT[$i]}") || info=''
+                "${JOURNAL_UNOWNED_IDENTITY[$i]}" "${JOURNAL_UNOWNED_FINGERPRINT[$i]}" move) || info=''
             if [[ -n "$info" ]]; then
                 IFS=$'\t' read -r actual actual_parent actual_parent_identity actual_name <<<"$info"
                 JOURNAL_UNOWNED[$i]=$actual
@@ -1641,7 +1772,7 @@ prepare_install_parent() {
         if [[ -e "$component" ]]; then
             [[ -d "$component" ]] || return 1
         else
-            mkdir -- "$component" || return 1
+            run_without_report_fd mkdir -- "$component" || return 1
         fi
         [[ -d "$component" && ! -L "$component" ]] || return 1
         parent_physical=$(pwd -P) || return 1
@@ -1763,7 +1894,7 @@ stage_backup_target() (
     stage_status=0
     if [[ "$(path_identity "$stage_name" 2>/dev/null || true)" == "$expected_target_identity" && \
         "$(path_fingerprint "$stage_name" 2>/dev/null || true)" == "$expected_fingerprint" ]]; then
-        actual="$(/bin/pwd -P)/$stage_name"
+        actual="$(run_without_report_fd /bin/pwd -P)/$stage_name"
     elif [[ -d "$stage_name" && ! -L "$stage_name" ]]; then
         nested="$stage_name/$target_name"
         if [[ "$(path_identity "$nested" 2>/dev/null || true)" == "$expected_target_identity" && \
@@ -1772,13 +1903,13 @@ stage_backup_target() (
             recovery_nested="$recovery_name/$target_name"
             if [[ "$(path_identity "$nested" 2>/dev/null || true)" == "$expected_target_identity" && \
                 "$(path_fingerprint "$nested" 2>/dev/null || true)" == "$expected_fingerprint" ]]; then
-                actual="$(/bin/pwd -P)/$nested"
+                actual="$(run_without_report_fd /bin/pwd -P)/$nested"
             elif [[ "$(path_identity "$recovery_nested" 2>/dev/null || true)" == "$expected_target_identity" && \
                 "$(path_fingerprint "$recovery_nested" 2>/dev/null || true)" == "$expected_fingerprint" ]]; then
-                actual="$(/bin/pwd -P)/$recovery_nested"
+                actual="$(run_without_report_fd /bin/pwd -P)/$recovery_nested"
             elif [[ "$(path_identity "$recovery_name" 2>/dev/null || true)" == "$expected_target_identity" && \
                 "$(path_fingerprint "$recovery_name" 2>/dev/null || true)" == "$expected_fingerprint" ]]; then
-                actual="$(/bin/pwd -P)/$recovery_name"
+                actual="$(run_without_report_fd /bin/pwd -P)/$recovery_name"
             fi
         fi
         stage_status=74
@@ -1788,14 +1919,14 @@ stage_backup_target() (
     [[ -n "$actual" ]] || return 74
     actual_name=${actual##*/}
     cd -P -- "${actual%/*}" || return 74
-    immediate_parent_physical=$(/bin/pwd -P) || return 74
+    immediate_parent_physical=$(run_without_report_fd /bin/pwd -P) || return 74
     immediate_parent_identity=$(path_identity .) || return 74
     artifact_identity=$(path_identity "$actual_name") || return 74
     artifact_fingerprint=$(path_fingerprint "$actual_name") || return 74
     [[ "$artifact_identity" == "$expected_target_identity" && "$artifact_fingerprint" == "$expected_fingerprint" ]] || return 74
     install_test_hook backup_stage_after_move "$target_path" "$immediate_parent_physical/$actual_name" \
         "$artifact_identity" "$EFFECTIVE_HOME" || hook_status=$?
-    current_parent_physical=$(/bin/pwd -P 2>/dev/null) || current_parent_physical=$immediate_parent_physical
+    current_parent_physical=$(run_without_report_fd /bin/pwd -P 2>/dev/null) || current_parent_physical=$immediate_parent_physical
     current_parent_identity=$(path_identity . 2>/dev/null) || current_parent_identity=$immediate_parent_identity
     actual="$current_parent_physical/$actual_name"
     if [[ $stage_status -eq 0 ]]; then
@@ -1829,12 +1960,12 @@ move_staged_backup() (
     stage_name=${stage_path##*/}
     state_cwd_matches_pin || return 74
     refresh_state_physical_from_cwd || return $?
-    root_physical=$(/bin/pwd -P) || return 74
+    root_physical=$(run_without_report_fd /bin/pwd -P) || return 74
     stage_identity=$(path_identity "$stage_path") || return 74
     [[ "$stage_identity" == "$expected_stage_identity" ]] || return 74
     [[ "$(path_fingerprint "$stage_path" 2>/dev/null || true)" == "$expected_fingerprint" ]] || return 74
     cd -P -- "${backup_path%/*}" || return 74
-    path_within "$(/bin/pwd -P)" "$root_physical" || return 74
+    path_within "$(run_without_report_fd /bin/pwd -P)" "$root_physical" || return 74
     backup_name=${backup_path##*/}
     move_no_clobber_exact "$stage_path" "$backup_name" backup_stage_publish || return 74
     if [[ "$MOVE_RESULT_IDENTITY" != "$expected_stage_identity" || \
@@ -1846,12 +1977,12 @@ move_staged_backup() (
     actual=''
     if [[ ( -f "$backup_name" || -L "$backup_name" ) && \
         "$(path_identity "$backup_name" 2>/dev/null || true)" == "$stage_identity" ]]; then
-        actual="$(/bin/pwd -P)/$backup_name"
+        actual="$(run_without_report_fd /bin/pwd -P)/$backup_name"
     elif [[ -d "$backup_name" && ! -L "$backup_name" ]]; then
         container_path="$backup_name/$stage_name"
         if [[ ( -f "$container_path" || -L "$container_path" ) && \
             "$(path_identity "$container_path" 2>/dev/null || true)" == "$stage_identity" ]]; then
-            actual="$(/bin/pwd -P)/$container_path"
+            actual="$(run_without_report_fd /bin/pwd -P)/$container_path"
         fi
         status=74
     elif [[ ( -f "$stage_path" || -L "$stage_path" ) && \
@@ -1863,13 +1994,13 @@ move_staged_backup() (
     [[ -n "$actual" ]] || return 74
     actual_name=${actual##*/}
     cd -P -- "${actual%/*}" || return 74
-    immediate_parent_physical=$(/bin/pwd -P) || return 74
+    immediate_parent_physical=$(run_without_report_fd /bin/pwd -P) || return 74
     immediate_parent_identity=$(path_identity .) || return 74
     artifact_identity=$(path_identity "$actual_name") || return 74
     artifact_fingerprint=$(path_fingerprint "$actual_name") || return 74
     install_test_hook backup_publish_after_move "$target_path" "$immediate_parent_physical/$actual_name" \
         "$artifact_identity" "$STATE_ROOT" || hook_status=$?
-    current_parent_physical=$(/bin/pwd -P 2>/dev/null) || current_parent_physical=$immediate_parent_physical
+    current_parent_physical=$(run_without_report_fd /bin/pwd -P 2>/dev/null) || current_parent_physical=$immediate_parent_physical
     current_parent_identity=$(path_identity . 2>/dev/null) || current_parent_identity=$immediate_parent_identity
     actual="$current_parent_physical/$actual_name"
     printf 'OWNED\t%s\t%s\t%s\t%s\t%s\n' "$actual" "$current_parent_physical" "$current_parent_identity" \
@@ -1896,9 +2027,9 @@ create_link_temp() (
     publication_parent_matches_pin "$target_path" "$expected_parent_physical" "$expected_parent_identity" || return 65
     [[ ! -e "$target_name" && ! -L "$target_name" && ! -e "$temp_name" && ! -L "$temp_name" ]] || return 65
     safe_source "$source" || return 65
-    ln -s -- "$source" "$temp_name" || return 74
+    run_without_report_fd ln -s -- "$source" "$temp_name" || return 74
     publication_parent_matches_pin "$target_path" "$expected_parent_physical" "$expected_parent_identity" || return 74
-    [[ -L "$temp_name" && "$(readlink "$temp_name")" == "$source" ]] || return 65
+    [[ -L "$temp_name" && "$(run_without_report_fd readlink "$temp_name")" == "$source" ]] || return 65
     identity=$(path_identity "$temp_name") || return 65
     printf '%s\n' "$identity"
 )
@@ -1913,7 +2044,7 @@ publish_link_temp() (
     pin_apply_target_parent "$source" "$target_path" "$relative_path" 0 "$expected_parent_physical" "$expected_parent_identity" || return $?
     target_name=${relative_path##*/}
     temp_name=${temp_path##*/}
-    [[ -L "$temp_name" && "$(readlink "$temp_name")" == "$source" ]] || return 65
+    [[ -L "$temp_name" && "$(run_without_report_fd readlink "$temp_name")" == "$source" ]] || return 65
     [[ "$(path_identity "$temp_name")" == "$expected_identity" ]] || return 65
     [[ ! -e "$target_name" && ! -L "$target_name" ]] || return 65
     publication_parent_matches_pin "$target_path" "$expected_parent_physical" "$expected_parent_identity" || return 65
@@ -1972,7 +2103,7 @@ publish_link_temp() (
     artifact_fingerprint=$(path_fingerprint "$actual_name") || return 74
     install_test_hook link_publish_after_move "$target_path" "$immediate_parent_physical/$actual_name" \
         "$artifact_identity" "$EFFECTIVE_HOME" || hook_status=$?
-    current_parent_physical=$(/bin/pwd -P 2>/dev/null) || current_parent_physical=$immediate_parent_physical
+    current_parent_physical=$(run_without_report_fd /bin/pwd -P 2>/dev/null) || current_parent_physical=$immediate_parent_physical
     current_parent_identity=$(path_identity . 2>/dev/null) || current_parent_identity=$immediate_parent_identity
     actual="$current_parent_physical/$actual_name"
     printf 'PUBLICATION\t%s\t%s\t%s\t%s\t%s\n' "$actual" "$current_parent_physical" "$current_parent_identity" \
@@ -2006,7 +2137,7 @@ apply_install_entry() {
     PLAN_PARENT_IDENTITY[$plan_index]=$parent_identity
     if [[ "$action" == BACKUP ]]; then
         backup_path="$BACKUP_FILES/$relative_path"
-        mkdir -p -- "$(dirname "$backup_path")" || return 74
+        run_without_report_fd mkdir -p -- "$(run_without_report_fd dirname "$backup_path")" || return 74
         [[ ! -e "$backup_path" && ! -L "$backup_path" ]] || return 74
         journal_index=$JOURNAL_COUNT
         backup_stage="${target_path%/*}/.dotfiles-backup-$$-$journal_index"
@@ -2270,7 +2401,7 @@ stage_rollback_link_path() (
         restore_local_stage_exact "$stage_name" "$name" || true
         return 2
     fi
-    if [[ ! -L "$stage_name" || "$(readlink "$stage_name")" != "$source" ]]; then
+    if [[ ! -L "$stage_name" || "$(run_without_report_fd readlink "$stage_name")" != "$source" ]]; then
         restore_local_stage_exact "$stage_name" "$name" || true
         return 2
     fi
@@ -2309,7 +2440,7 @@ rollback_link_entry() {
     local aux_parent_physical=${15} aux_parent_identity=${16} aux_identity=${17}
     local quarantine_dir target_dir temp_dir actual_dir entry_status status=0
     quarantine_dir="$QUARANTINE_ROOT/link-$journal_index"
-    mkdir -p -- "$quarantine_dir" || return 1
+    run_without_report_fd mkdir -p -- "$quarantine_dir" || return 1
     target_dir=${target_path%/*}
     temp_dir=${temp_path%/*}
     if [[ -n "$publication_identity" && -z "$publication_path" ]]; then
@@ -2551,17 +2682,17 @@ rollback_transaction() {
 }
 
 cleanup_transaction_storage() {
-    [[ -n "$QUARANTINE_ROOT" ]] && rmdir -- "$QUARANTINE_ROOT" 2>/dev/null || true
-    [[ -n "$TRANSACTION_ROOT" ]] && rmdir -- "$TRANSACTION_ROOT" 2>/dev/null || true
-    rmdir -- transactions 2>/dev/null || true
+    [[ -n "$QUARANTINE_ROOT" ]] && run_without_report_fd rmdir -- "$QUARANTINE_ROOT" 2>/dev/null || true
+    [[ -n "$TRANSACTION_ROOT" ]] && run_without_report_fd rmdir -- "$TRANSACTION_ROOT" 2>/dev/null || true
+    run_without_report_fd rmdir -- transactions 2>/dev/null || true
 }
 
 cleanup_success_transaction_storage() {
     state_cwd_matches_pin || return 74
     [[ -n "$QUARANTINE_ROOT" ]] || return 74
-    rmdir -- "$QUARANTINE_ROOT" || return 74
-    rmdir -- "$TRANSACTION_ROOT" || return 74
-    rmdir -- transactions 2>/dev/null || true
+    run_without_report_fd rmdir -- "$QUARANTINE_ROOT" || return 74
+    run_without_report_fd rmdir -- "$TRANSACTION_ROOT" || return 74
+    run_without_report_fd rmdir -- transactions 2>/dev/null || true
     TRANSACTION_ROOT=''
     QUARANTINE_ROOT=''
 }
@@ -2580,6 +2711,7 @@ transaction_trap() {
     if [[ "$TRANSACTION_ACTIVE" == 1 && "$status" -ne 0 ]]; then
         rollback_transaction || true
     fi
+    [[ "$status" -eq 0 ]] || diagnose_report_recovery || true
     TRANSACTION_ACTIVE=0
     close_report_handle || true
     cleanup_transaction_storage
@@ -2635,6 +2767,10 @@ commit_transaction() {
 finish_transaction() {
     local status=0
     [[ "$TRANSACTION_ACTIVE" == 0 ]] || return 74
+    remove_report_recovery_link || status=$?
+    if [[ $status -ne 0 ]]; then
+        diagnose_report_recovery || true
+    fi
     close_report_handle || status=$?
     cleanup_success_transaction_storage || status=$?
     release_lock || status=$?
@@ -2712,7 +2848,7 @@ verify_install_entry_postcondition() (
     }
     target_name=${relative_path##*/}
     [[ -L "$target_name" ]] || { printf '%s: installed target is not a symlink\n' "$PROGRAM" >&2; return 65; }
-    [[ "$(readlink "$target_name")" == "$source" ]] || {
+    [[ "$(run_without_report_fd readlink "$target_name")" == "$source" ]] || {
         printf '%s: installed target points elsewhere\n' "$PROGRAM" >&2; return 65;
     }
     [[ "$(path_identity "$target_name")" == "$expected_target_identity" ]] || {
