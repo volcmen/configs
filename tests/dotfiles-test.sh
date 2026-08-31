@@ -8,6 +8,7 @@ FAIL_COUNT=0
 CLI_STATUS=0
 CLI_OUTPUT=""
 SELECTED_TESTS=("$@")
+MATCHED_TESTS=()
 
 cleanup() {
     if [[ -n "$TEST_TMP" && -d "$TEST_TMP" ]]; then
@@ -82,6 +83,7 @@ run_test() {
             [[ "$selected_name" == "$name" ]] && selected=1
         done
         [[ $selected -eq 1 ]] || return 0
+        MATCHED_TESTS+=("$name")
     fi
     if "$name"; then
         PASS_COUNT=$((PASS_COUNT + 1))
@@ -90,6 +92,21 @@ run_test() {
         FAIL_COUNT=$((FAIL_COUNT + 1))
         printf 'not ok - %s\n' "$name"
     fi
+}
+
+validate_selected_tests() {
+    local selected_name matched_name matched
+
+    for selected_name in "${SELECTED_TESTS[@]}"; do
+        matched=0
+        for matched_name in "${MATCHED_TESTS[@]:-}"; do
+            [[ "$matched_name" == "$selected_name" ]] && matched=1
+        done
+        if [[ $matched -eq 0 ]]; then
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+            printf 'FAIL: unknown focused test: %s\n' "$selected_name" >&2
+        fi
+    done
 }
 
 test_help() {
@@ -3628,6 +3645,35 @@ test_waybar_uses_lua_workspace_dispatch_and_uwsm_logout() {
     grep -Fq '"logout":   "uwsm stop",' "$waybar"
 }
 
+test_focused_test_selection_rejects_unknown_names_and_runs_known_once() {
+    local output status known_count
+
+    if output="$(bash "$PROJECT_ROOT/tests/dotfiles-test.sh" definitely_not_registered 2>&1)"; then
+        status=0
+    else
+        status=$?
+    fi
+    [[ "$status" -ne 0 ]] || fail "unknown focused test unexpectedly passed: $output" || return 1
+    [[ "$output" == *'unknown focused test: definitely_not_registered'* ]] || return 1
+
+    if output="$(bash "$PROJECT_ROOT/tests/dotfiles-test.sh" test_help definitely_not_registered 2>&1)"; then
+        status=0
+    else
+        status=$?
+    fi
+    [[ "$status" -ne 0 ]] || fail "mixed focused tests unexpectedly passed: $output" || return 1
+    [[ "$output" == *'unknown focused test: definitely_not_registered'* ]] || return 1
+
+    if output="$(bash "$PROJECT_ROOT/tests/dotfiles-test.sh" test_help 2>&1)"; then
+        status=0
+    else
+        status=$?
+    fi
+    [[ "$status" -eq 0 ]] || fail "known focused test failed: $output" || return 1
+    known_count="$(printf '%s\n' "$output" | grep -Ec '^ok - test_help$')"
+    [[ "$known_count" -eq 1 ]] || fail "test_help ran $known_count times: $output"
+}
+
 test_documentation_records_operations_and_compatibility_evidence() {
     local readme="$PROJECT_ROOT/README.md"
     local audit="$PROJECT_ROOT/docs/compatibility/2026-08-30-platform-audit.md"
@@ -3811,9 +3857,11 @@ run_test test_install_rejects_home_swapped_before_pinning
 run_test test_hyprland_animations_preserve_values_and_curve_types
 run_test test_hypridle_uses_lua_dpms_dispatch
 run_test test_waybar_uses_lua_workspace_dispatch_and_uwsm_logout
+run_test test_focused_test_selection_rejects_unknown_names_and_runs_known_once
 run_test test_dotfiles_copy_dispatches_portably
 run_test test_shared_terminal_behavior_is_canonical
 run_test test_shared_fish_yazi_and_fontconfig_are_portable
 run_test test_documentation_records_operations_and_compatibility_evidence
+validate_selected_tests
 printf '%s passed; %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
 [[ "$FAIL_COUNT" -eq 0 ]]
