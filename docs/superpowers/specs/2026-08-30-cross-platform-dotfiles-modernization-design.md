@@ -259,10 +259,14 @@ Installation rules:
    cloned at any location.
 8. Never replace regular files or foreign symlinks without `--backup`.
 9. Never move a directory/type conflict automatically, even with `--backup`.
-10. Reject backup plans whose existing target parents are on a different
-    filesystem from the pinned state root; never copy as a fallback.
+10. Safely create or inspect and identity-pin the real `backups` container,
+    then reject backup plans whose existing target parents are on a different
+    filesystem from that container's actual device; never copy as a fallback.
 11. Accept the state root's `transactions` and `backups` children only as real,
     physically contained, identity-pinned directories, never as symlinks.
+    Carry and revalidate those physical identities, plus the unique
+    transaction, backup, quarantine, and backup-files identities, through
+    hooks, recovery, reporting, and ownership-aware cleanup.
 12. Never run package installation, service, session, login-shell, or reload
     commands.
 

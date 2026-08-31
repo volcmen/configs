@@ -62,6 +62,29 @@ write_manifest() {
     printf '%s\n' "$1" >"$TEST_TMP/repo/dotfiles.manifest"
 }
 
+write_bsd_device_override_stat() {
+    local stub=$1 overridden_physical=$2 overridden_device=$3
+    cat >"$stub" <<STUB
+#!/bin/sh
+[ "\$1" = -f ] && [ "\$2" = %d:%i ] || exit 91
+shift 2
+identity=\$(/usr/bin/stat -f '%d:%i' "\$1") || exit
+if [ "\$1" = . ]; then
+    physical=\$(/bin/pwd -P) || exit
+elif [ -d "\$1" ]; then
+    physical=\$(cd -P -- "\$1" && /bin/pwd -P) || exit
+else
+    physical=''
+fi
+if [ "\$physical" = "$overridden_physical" ]; then
+    printf '%s:%s\n' "$overridden_device" "\${identity#*:}"
+else
+    printf '%s\n' "\$identity"
+fi
+STUB
+    chmod +x "$stub"
+}
+
 run_detect() {
     if CLI_OUTPUT="$(DOTFILES_TESTING=1 \
         DOTFILES_TEST_HOME="$TEST_TMP/home" \
@@ -971,33 +994,144 @@ test_install_cross_device_backup_is_rejected_before_home_or_backup_mutation() {
     write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
     original_identity="$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/demo/config")"
     stub="$TEST_TMP/stub-bin/stat"
-    cat >"$stub" <<STUB
-#!/bin/sh
-[ "\$1" = -f ] && [ "\$2" = %d:%i ] || exit 91
-shift 2
-identity=\$(/usr/bin/stat -f '%d:%i' "\$1") || exit
-if [ "\$1" = . ]; then
-    physical=\$(/bin/pwd -P) || exit
-elif [ -d "\$1" ]; then
-    physical=\$(cd -P -- "\$1" && /bin/pwd -P) || exit
-else
-    physical=''
-fi
-if [ "\$physical" = "$TEST_TMP/home/.config/demo" ]; then
-    printf '999999:%s\n' "\${identity#*:}"
-else
-    printf '%s\n' "\$identity"
-fi
-STUB
-    chmod +x "$stub"
+    write_bsd_device_override_stat "$stub" "$TEST_TMP/home/.config/demo" 999999
 
     DOTFILES_TEST_TRANSACTION_KERNEL=Darwin DOTFILES_TEST_STAT_COMMAND="$stub" \
         run_cli install --apply --backup
-    assert_status 74 && assert_contains 'backup target parent is on a different device than the pinned state root' || return 1
+    assert_status 74 && assert_contains 'backup target parent is on a different device than the pinned backups container' || return 1
     [[ -f "$TEST_TMP/home/.config/demo/config" && ! -L "$TEST_TMP/home/.config/demo/config" ]] || return 1
     [[ "$(<"$TEST_TMP/home/.config/demo/config")" == existing ]] || return 1
     [[ "$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/demo/config")" == "$original_identity" ]] || return 1
     assert_not_exists "$TEST_TMP/state/backups"
+}
+
+test_install_nested_backup_device_is_rejected_before_home_mutation() {
+    local stub original_identity
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo" \
+        "$TEST_TMP/state/backups" "$TEST_TMP/stub-bin"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    original_identity="$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/demo/config")"
+    stub="$TEST_TMP/stub-bin/stat"
+    write_bsd_device_override_stat "$stub" "$TEST_TMP/state/backups" 888888
+
+    DOTFILES_TEST_TRANSACTION_KERNEL=Darwin DOTFILES_TEST_STAT_COMMAND="$stub" \
+        run_cli install --apply --backup
+    assert_status 74 && assert_contains 'backup target parent is on a different device than the pinned backups container' || return 1
+    [[ -f "$TEST_TMP/home/.config/demo/config" && ! -L "$TEST_TMP/home/.config/demo/config" ]] || return 1
+    [[ "$(<"$TEST_TMP/home/.config/demo/config")" == existing ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/demo/config")" == "$original_identity" ]] || return 1
+    [[ -d "$TEST_TMP/state/backups" && -z "$(find "$TEST_TMP/state/backups" -mindepth 1 -print)" ]] || return 1
+    assert_not_exists "$TEST_TMP/state/transactions"
+}
+
+test_install_preexisting_transactions_survives_backup_device_rejection() {
+    local stub transactions_identity
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo" \
+        "$TEST_TMP/state/backups" "$TEST_TMP/state/transactions" "$TEST_TMP/stub-bin"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    transactions_identity="$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/state/transactions")"
+    stub="$TEST_TMP/stub-bin/stat"
+    write_bsd_device_override_stat "$stub" "$TEST_TMP/state/backups" 777777
+
+    DOTFILES_TEST_TRANSACTION_KERNEL=Darwin DOTFILES_TEST_STAT_COMMAND="$stub" \
+        run_cli install --apply --backup
+    assert_status 74 || return 1
+    [[ -d "$TEST_TMP/state/transactions" && ! -L "$TEST_TMP/state/transactions" ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/state/transactions")" == "$transactions_identity" ]] || return 1
+    [[ -z "$(find "$TEST_TMP/state/transactions" -mindepth 1 -print)" ]] || return 1
+    [[ -f "$TEST_TMP/home/.config/demo/config" && "$(<"$TEST_TMP/home/.config/demo/config")" == existing ]]
+}
+
+test_install_backup_container_swap_after_pin_never_escapes_or_mutates_home() {
+    local hook original_identity
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo" "$TEST_TMP/outside-backups"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    original_identity="$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/demo/config")"
+    hook="$TEST_TMP/swap-backups-after-pin"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = before_prepare_parent ] && [ ! -e "$TEST_TMP/backups-swapped" ]; then
+    : >"$TEST_TMP/backups-swapped"
+    /bin/mv "$TEST_TMP/state/backups" "$TEST_TMP/state/backups.pinned"
+    /bin/ln -s "$TEST_TMP/outside-backups" "$TEST_TMP/state/backups"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'post-pin backups swap falsely succeeded' || return 1
+    [[ -f "$TEST_TMP/backups-swapped" ]] || fail 'post-pin backups swap hook was not reached' || return 1
+    [[ -f "$TEST_TMP/home/.config/demo/config" && ! -L "$TEST_TMP/home/.config/demo/config" ]] || return 1
+    [[ "$(<"$TEST_TMP/home/.config/demo/config")" == existing ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/demo/config")" == "$original_identity" ]] || return 1
+    [[ -L "$TEST_TMP/state/backups" && "$(readlink "$TEST_TMP/state/backups")" == "$TEST_TMP/outside-backups" ]] || return 1
+    [[ -z "$(find "$TEST_TMP/outside-backups" -mindepth 1 -print)" ]]
+}
+
+test_install_transactions_swap_before_rollback_uses_pinned_quarantine() {
+    local hook quarantine
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/outside-transactions"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/swap-transactions-before-rollback"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = after_link_publish ]; then
+    /usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/demo/config" >"$TEST_TMP/published-link-identity"
+    /bin/mv "$TEST_TMP/state/transactions" "$TEST_TMP/state/transactions.pinned"
+    /bin/ln -s "$TEST_TMP/outside-transactions" "$TEST_TMP/state/transactions"
+    exit 77
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
+    assert_status 77 || return 1
+    [[ -f "$TEST_TMP/published-link-identity" ]] || fail 'post-publication transaction swap hook was not reached' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/config" || return 1
+    [[ -L "$TEST_TMP/state/transactions" && "$(readlink "$TEST_TMP/state/transactions")" == "$TEST_TMP/outside-transactions" ]] || return 1
+    [[ -z "$(find "$TEST_TMP/outside-transactions" -mindepth 1 -print)" ]] || return 1
+    quarantine="$(find "$TEST_TMP/state/transactions.pinned" -path '*/quarantine/link-*/actual' -type l -print)"
+    [[ -n "$quarantine" && "$(readlink "$quarantine")" == "$TEST_TMP/repo/home/.config/demo/config" ]]
+}
+
+test_install_transactions_cleanup_swap_never_removes_foreign_replacement() {
+    local hook foreign_quarantine
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/outside-transactions"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/swap-transactions-before-cleanup"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = success_cleanup_before_transaction_rmdir ]; then
+    child=\${2##*/}
+    /bin/mkdir -p "$TEST_TMP/outside-transactions/\$child/quarantine"
+    printf 'foreign\n' >"$TEST_TMP/outside-transactions/sentinel"
+    printf '%s\n' "$TEST_TMP/outside-transactions/\$child/quarantine" >"$TEST_TMP/foreign-quarantine"
+    /bin/mv "$TEST_TMP/state/transactions" "$TEST_TMP/state/transactions.pinned"
+    /bin/ln -s "$TEST_TMP/outside-transactions" "$TEST_TMP/state/transactions"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'transaction cleanup followed a foreign replacement' || return 1
+    foreign_quarantine="$(<"$TEST_TMP/foreign-quarantine")"
+    [[ -d "$foreign_quarantine" ]] || fail 'foreign quarantine directory was removed' || return 1
+    [[ "$(<"$TEST_TMP/outside-transactions/sentinel")" == foreign ]] || return 1
+    [[ -L "$TEST_TMP/state/transactions" && "$(readlink "$TEST_TMP/state/transactions")" == "$TEST_TMP/outside-transactions" ]] || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/config"
 }
 
 test_install_rejects_symlinked_transactions_container_without_escape() {
@@ -3506,7 +3640,7 @@ STUB
 }
 
 test_install_success_cleanup_swap_preserves_unrelated_content() {
-    local hook unrelated
+    local hook unrelated quarantine
     new_fixture
     mkdir -p "$TEST_TMP/repo/home/.config/demo"
     printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
@@ -3524,9 +3658,11 @@ STUB
 
     DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
     assert_status 74 || return 1
-    [[ -L "$TEST_TMP/home/.config/demo/config" ]] || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/config" || return 1
     unrelated="$(find "$TEST_TMP/state/transactions" -name unrelated -type f -print)"
     [[ -n "$unrelated" && "$(<"$unrelated")" == unrelated ]] || return 1
+    quarantine="$(find "$TEST_TMP/state/transactions" -path '*.owned/quarantine/link-*/actual' -type l -print)"
+    [[ -n "$quarantine" && "$(readlink "$quarantine")" == "$TEST_TMP/repo/home/.config/demo/config" ]] || return 1
     assert_not_exists "$TEST_TMP/state/install.lock"
 }
 
@@ -3879,6 +4015,11 @@ run_test test_install_backup_preserves_regular_file_relative_path
 run_test test_install_backup_preserves_foreign_symlink
 run_test test_install_backup_blocks_directory_conflict
 run_test test_install_cross_device_backup_is_rejected_before_home_or_backup_mutation
+run_test test_install_nested_backup_device_is_rejected_before_home_mutation
+run_test test_install_preexisting_transactions_survives_backup_device_rejection
+run_test test_install_backup_container_swap_after_pin_never_escapes_or_mutates_home
+run_test test_install_transactions_swap_before_rollback_uses_pinned_quarantine
+run_test test_install_transactions_cleanup_swap_never_removes_foreign_replacement
 run_test test_install_rejects_symlinked_transactions_container_without_escape
 run_test test_install_rejects_symlinked_backups_container_without_escape
 run_test test_install_root_swap_back_cannot_false_succeed

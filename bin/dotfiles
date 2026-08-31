@@ -32,7 +32,10 @@ TRANSACTIONS_ROOT_PHYSICAL=''; TRANSACTIONS_ROOT_IDENTITY=''
 BACKUPS_ROOT_PHYSICAL=''; BACKUPS_ROOT_IDENTITY=''
 TRANSACTION_ROOT_PHYSICAL=''; TRANSACTION_ROOT_IDENTITY=''
 BACKUP_ROOT_PHYSICAL=''; BACKUP_ROOT_IDENTITY=''
-TRANSACTION_ROOT=''; QUARANTINE_ROOT=''; BACKUP_ROOT=''; BACKUP_FILES=''; REPORT_PATH=''
+QUARANTINE_ROOT_IDENTITY=''; BACKUP_FILES_IDENTITY=''
+TRANSACTIONS_ROOT_CREATED=0; BACKUPS_ROOT_CREATED=0
+TRANSACTION_ROOT_NAME=''; BACKUP_ROOT_NAME=''
+TRANSACTION_ROOT=''; QUARANTINE_ROOT=''; BACKUP_ROOT=''; BACKUP_FILES=''; REPORT_PATH=''; REPORT_HOOK_PATH=''
 REPORT_IDENTITY=''; REPORT_RECOVERY_PATH=''; REPORT_RECOVERY_IDENTITY=''
 REPORT_RECOVERY_PARENT_PHYSICAL=''; REPORT_RECOVERY_PARENT_IDENTITY=''
 REPORT_FD_OPEN=0; REPORT_WRITE_FAILED=0
@@ -904,7 +907,7 @@ reset_transaction_journal() {
     MUTATION_COUNT=0
     PENDING_SIGNAL=0
     PRECOMMIT_CLEANUP_HOOK_RAN=0
-    REPORT_PATH=''; REPORT_IDENTITY=''; REPORT_RECOVERY_PATH=''; REPORT_RECOVERY_IDENTITY=''
+    REPORT_PATH=''; REPORT_HOOK_PATH=''; REPORT_IDENTITY=''; REPORT_RECOVERY_PATH=''; REPORT_RECOVERY_IDENTITY=''
     REPORT_RECOVERY_PARENT_PHYSICAL=''; REPORT_RECOVERY_PARENT_IDENTITY=''
     REPORT_FD_OPEN=0; REPORT_WRITE_FAILED=0
     REPORT_EXPECTED_ROW=(); REPORT_EXPECTED_COUNT=0
@@ -912,6 +915,9 @@ reset_transaction_journal() {
     BACKUPS_ROOT_PHYSICAL=''; BACKUPS_ROOT_IDENTITY=''
     TRANSACTION_ROOT_PHYSICAL=''; TRANSACTION_ROOT_IDENTITY=''
     BACKUP_ROOT_PHYSICAL=''; BACKUP_ROOT_IDENTITY=''
+    QUARANTINE_ROOT_IDENTITY=''; BACKUP_FILES_IDENTITY=''
+    TRANSACTIONS_ROOT_CREATED=0; BACKUPS_ROOT_CREATED=0
+    TRANSACTION_ROOT_NAME=''; BACKUP_ROOT_NAME=''
     MOVE_RESULT_NOOP=0; MOVE_RESULT_AMBIGUOUS=0
     TEST_FAIL_AFTER=''
     if [[ ${DOTFILES_TESTING:-0} == 1 ]]; then
@@ -1213,6 +1219,22 @@ state_physical_matches_pin() {
     [[ "$identity" == "$STATE_ROOT_IDENTITY" ]]
 }
 
+pinned_directory_matches() {
+    local path=$1 expected_identity=$2 identity physical
+    [[ -n "$path" && -n "$expected_identity" && -d "$path" && ! -L "$path" ]] || return 1
+    identity=$(path_identity "$path") || return 1
+    [[ "$identity" == "$expected_identity" ]] || return 1
+    physical=$(physical_dir "$path") || return 1
+    [[ "$physical" == "$path" ]]
+}
+
+pinned_file_matches() {
+    local path=$1 expected_identity=$2 identity
+    [[ -n "$path" && -n "$expected_identity" && -f "$path" && ! -L "$path" ]] || return 1
+    identity=$(path_identity "$path") || return 1
+    [[ "$identity" == "$expected_identity" ]]
+}
+
 state_container_name_matches_pin() {
     local name=$1 expected_physical=$2 expected_identity=$3 identity physical
     state_cwd_matches_pin || return 1
@@ -1224,10 +1246,11 @@ state_container_name_matches_pin() {
 }
 
 pin_state_container() {
-    local name=$1 pin identity physical
+    local name=$1 pin identity physical created=0
     state_cwd_matches_pin && state_name_matches_pin || return 74
     if [[ ! -e "$name" && ! -L "$name" ]]; then
         run_without_report_fd mkdir -- "$name" || return 74
+        created=1
     fi
     if [[ ! -d "$name" || -L "$name" ]]; then
         printf '%s: state container is not a real directory: %s\n' "$PROGRAM" "$name" >&2
@@ -1237,7 +1260,7 @@ pin_state_container() {
     IFS=$'\t' read -r identity physical <<<"$pin"
     [[ -n "$identity" && "$physical" == "$STATE_ROOT_PHYSICAL/$name" ]] || return 74
     state_container_name_matches_pin "$name" "$physical" "$identity" || return 74
-    printf '%s\t%s\n' "$identity" "$physical"
+    printf '%s\t%s\t%s\n' "$identity" "$physical" "$created"
 }
 
 create_pinned_state_storage() (
@@ -1276,9 +1299,153 @@ state_storage_name_matches_pin() {
     [[ "$physical" == "$storage_physical" && "$physical" == "$container_physical"/* ]]
 }
 
+locate_pinned_directory_in_parent() (
+    local parent_path=$1 parent_identity=$2 expected_identity=$3 candidate identity
+    local parent_physical match='' match_name='' match_count=0
+    pinned_directory_matches "$parent_path" "$parent_identity" || return 1
+    cd -P -- "$parent_path" || return 1
+    parent_physical=$(run_without_report_fd /bin/pwd -P) || return 1
+    shopt -s dotglob nullglob
+    for candidate in ./*; do
+        [[ -d "$candidate" && ! -L "$candidate" ]] || continue
+        identity=$(path_identity "$candidate") || continue
+        [[ "$identity" == "$expected_identity" ]] || continue
+        match=${candidate#./}
+        match_name=$match
+        match_count=$((match_count + 1))
+    done
+    [[ $match_count -eq 1 ]] || return 1
+    printf '%s\t%s\n' "$parent_physical/$match" "$match_name"
+)
+
+transaction_storage_pins_match() {
+    pinned_directory_matches "$TRANSACTIONS_ROOT_PHYSICAL" "$TRANSACTIONS_ROOT_IDENTITY" || return 1
+    pinned_directory_matches "$TRANSACTION_ROOT_PHYSICAL" "$TRANSACTION_ROOT_IDENTITY" || return 1
+    pinned_directory_matches "$QUARANTINE_ROOT" "$QUARANTINE_ROOT_IDENTITY"
+}
+
+backup_storage_pins_match() {
+    pinned_directory_matches "$BACKUPS_ROOT_PHYSICAL" "$BACKUPS_ROOT_IDENTITY" || return 1
+    pinned_directory_matches "$BACKUP_ROOT_PHYSICAL" "$BACKUP_ROOT_IDENTITY" || return 1
+    pinned_directory_matches "$BACKUP_FILES" "$BACKUP_FILES_IDENTITY"
+}
+
+refresh_pinned_state_storage() {
+    local info actual actual_name status=0 expected
+
+    if [[ -n "$TRANSACTIONS_ROOT_IDENTITY" ]]; then
+        info=$(locate_pinned_directory_in_parent "$STATE_ROOT_PHYSICAL" "$STATE_ROOT_IDENTITY" \
+            "$TRANSACTIONS_ROOT_IDENTITY") || info=''
+        if [[ -n "$info" ]]; then
+            IFS=$'\t' read -r actual actual_name <<<"$info"
+            TRANSACTIONS_ROOT_PHYSICAL=$actual
+            [[ "$actual_name" == transactions ]] || status=74
+        else
+            TRANSACTIONS_ROOT_PHYSICAL=''
+            status=74
+        fi
+    fi
+
+    if [[ -n "$TRANSACTION_ROOT_IDENTITY" && -n "$TRANSACTIONS_ROOT_PHYSICAL" ]]; then
+        info=$(locate_pinned_directory_in_parent "$TRANSACTIONS_ROOT_PHYSICAL" "$TRANSACTIONS_ROOT_IDENTITY" \
+            "$TRANSACTION_ROOT_IDENTITY") || info=''
+        if [[ -n "$info" ]]; then
+            IFS=$'\t' read -r actual actual_name <<<"$info"
+            TRANSACTION_ROOT_PHYSICAL=$actual
+            TRANSACTION_ROOT=$actual
+            [[ "$actual_name" == "$TRANSACTION_ROOT_NAME" ]] || status=74
+        else
+            TRANSACTION_ROOT_PHYSICAL=''
+            TRANSACTION_ROOT=''
+            status=74
+        fi
+    fi
+
+    if [[ -n "$QUARANTINE_ROOT_IDENTITY" && -n "$TRANSACTION_ROOT_PHYSICAL" ]]; then
+        info=$(locate_pinned_directory_in_parent "$TRANSACTION_ROOT_PHYSICAL" "$TRANSACTION_ROOT_IDENTITY" \
+            "$QUARANTINE_ROOT_IDENTITY") || info=''
+        if [[ -n "$info" ]]; then
+            IFS=$'\t' read -r actual actual_name <<<"$info"
+            QUARANTINE_ROOT=$actual
+            [[ "$actual_name" == quarantine ]] || status=74
+        else
+            QUARANTINE_ROOT=''
+            status=74
+        fi
+    fi
+
+    if [[ -n "$BACKUPS_ROOT_IDENTITY" ]]; then
+        info=$(locate_pinned_directory_in_parent "$STATE_ROOT_PHYSICAL" "$STATE_ROOT_IDENTITY" \
+            "$BACKUPS_ROOT_IDENTITY") || info=''
+        if [[ -n "$info" ]]; then
+            IFS=$'\t' read -r actual actual_name <<<"$info"
+            BACKUPS_ROOT_PHYSICAL=$actual
+            [[ "$actual_name" == backups ]] || status=74
+        else
+            BACKUPS_ROOT_PHYSICAL=''
+            status=74
+        fi
+    fi
+
+    if [[ -n "$BACKUP_ROOT_IDENTITY" && -n "$BACKUPS_ROOT_PHYSICAL" ]]; then
+        info=$(locate_pinned_directory_in_parent "$BACKUPS_ROOT_PHYSICAL" "$BACKUPS_ROOT_IDENTITY" \
+            "$BACKUP_ROOT_IDENTITY") || info=''
+        if [[ -n "$info" ]]; then
+            IFS=$'\t' read -r actual actual_name <<<"$info"
+            BACKUP_ROOT_PHYSICAL=$actual
+            BACKUP_ROOT=$actual
+            [[ "$actual_name" == "$BACKUP_ROOT_NAME" ]] || status=74
+        else
+            BACKUP_ROOT_PHYSICAL=''
+            BACKUP_ROOT=''
+            status=74
+        fi
+    fi
+
+    if [[ -n "$BACKUP_FILES_IDENTITY" && -n "$BACKUP_ROOT_PHYSICAL" ]]; then
+        info=$(locate_pinned_directory_in_parent "$BACKUP_ROOT_PHYSICAL" "$BACKUP_ROOT_IDENTITY" \
+            "$BACKUP_FILES_IDENTITY") || info=''
+        if [[ -n "$info" ]]; then
+            IFS=$'\t' read -r actual actual_name <<<"$info"
+            BACKUP_FILES=$actual
+            [[ "$actual_name" == files ]] || status=74
+        else
+            BACKUP_FILES=''
+            status=74
+        fi
+    fi
+
+    if [[ -n "$REPORT_IDENTITY" ]]; then
+        if [[ -n "$BACKUP_ROOT_PHYSICAL" ]]; then
+            expected="$BACKUP_ROOT_PHYSICAL/report.tsv"
+            if pinned_file_matches "$expected" "$REPORT_IDENTITY"; then
+                REPORT_PATH=$expected
+            else
+                REPORT_PATH=''
+                status=74
+            fi
+        else
+            REPORT_PATH=''
+            status=74
+        fi
+    fi
+    return "$status"
+}
+
+prepare_backup_container() {
+    local container_pin
+    if [[ -n "$BACKUPS_ROOT_IDENTITY" ]]; then
+        state_container_name_matches_pin backups "$BACKUPS_ROOT_PHYSICAL" "$BACKUPS_ROOT_IDENTITY" || return 74
+        return 0
+    fi
+    container_pin=$(pin_state_container backups) || return $?
+    IFS=$'\t' read -r BACKUPS_ROOT_IDENTITY BACKUPS_ROOT_PHYSICAL BACKUPS_ROOT_CREATED <<<"$container_pin"
+    [[ -n "$BACKUPS_ROOT_IDENTITY" && -n "$BACKUPS_ROOT_PHYSICAL" ]] || return 74
+}
+
 preflight_backup_devices() {
-    local state_device=${STATE_ROOT_IDENTITY%%:*} target_parent target_device pin_index i found
-    [[ -n "$state_device" ]] || return 74
+    local backups_device=${BACKUPS_ROOT_IDENTITY%%:*} target_parent target_device pin_index i found
+    [[ -n "$backups_device" ]] || return 74
     install_root_name_matches_pin && pinned_install_names_match || return 65
     state_cwd_matches_pin && state_name_matches_pin || return 74
     for ((i=0; i<${#PLAN_ACTION[@]}; i++)); do
@@ -1292,8 +1459,8 @@ preflight_backup_devices() {
             break
         done
         [[ $found -eq 1 && -n "$target_device" ]] || return 65
-        if [[ "$target_device" != "$state_device" ]]; then
-            printf '%s: backup target parent is on a different device than the pinned state root: %s; no home or backup files were changed\n' \
+        if [[ "$target_device" != "$backups_device" ]]; then
+            printf '%s: backup target parent is on a different device than the pinned backups container: %s; no home or backup files were changed\n' \
                 "$PROGRAM" "${PLAN_PATH[$i]}" >&2
             return 74
         fi
@@ -1343,40 +1510,48 @@ release_lock() {
 }
 
 begin_transaction_storage() {
-    local timestamp container_pin storage_pin child
+    local timestamp container_pin storage_pin child nested_identity
     state_cwd_matches_pin && state_name_matches_pin || return 74
     timestamp=$(run_without_report_fd date -u +%Y%m%dT%H%M%SZ) || return 74
     container_pin=$(pin_state_container transactions) || return $?
-    IFS=$'\t' read -r TRANSACTIONS_ROOT_IDENTITY TRANSACTIONS_ROOT_PHYSICAL <<<"$container_pin"
+    IFS=$'\t' read -r TRANSACTIONS_ROOT_IDENTITY TRANSACTIONS_ROOT_PHYSICAL TRANSACTIONS_ROOT_CREATED <<<"$container_pin"
     child="$timestamp-$$"
-    TRANSACTION_ROOT="transactions/$child"
+    TRANSACTION_ROOT_NAME=$child
     storage_pin=$(create_pinned_state_storage "$TRANSACTIONS_ROOT_PHYSICAL" \
         "$TRANSACTIONS_ROOT_IDENTITY" "$child" quarantine 700) || return $?
     IFS=$'\t' read -r TRANSACTION_ROOT_IDENTITY TRANSACTION_ROOT_PHYSICAL <<<"$storage_pin"
+    TRANSACTION_ROOT=$TRANSACTION_ROOT_PHYSICAL
     state_storage_name_matches_pin transactions "$TRANSACTIONS_ROOT_PHYSICAL" \
-        "$TRANSACTIONS_ROOT_IDENTITY" "$TRANSACTION_ROOT" "$TRANSACTION_ROOT_PHYSICAL" \
+        "$TRANSACTIONS_ROOT_IDENTITY" "transactions/$child" "$TRANSACTION_ROOT_PHYSICAL" \
         "$TRANSACTION_ROOT_IDENTITY" || return 74
-    QUARANTINE_ROOT="$TRANSACTION_ROOT/quarantine"
+    QUARANTINE_ROOT="$TRANSACTION_ROOT_PHYSICAL/quarantine"
     [[ -d "$QUARANTINE_ROOT" && ! -L "$QUARANTINE_ROOT" ]] || return 74
+    nested_identity=$(path_identity "$QUARANTINE_ROOT") || return 74
+    QUARANTINE_ROOT_IDENTITY=$nested_identity
+    pinned_directory_matches "$QUARANTINE_ROOT" "$QUARANTINE_ROOT_IDENTITY" || return 74
     honor_pending_signal || return $?
 }
 
 begin_backup() {
-    local timestamp noclobber_was_set=0 open_status=0 container_pin storage_pin child report_creation_path
+    local timestamp noclobber_was_set=0 open_status=0 storage_pin child report_creation_path nested_identity
     state_cwd_matches_pin && state_name_matches_pin || return 74
     timestamp=$(run_without_report_fd date -u +%Y%m%dT%H%M%SZ) || return 74
-    container_pin=$(pin_state_container backups) || return $?
-    IFS=$'\t' read -r BACKUPS_ROOT_IDENTITY BACKUPS_ROOT_PHYSICAL <<<"$container_pin"
+    prepare_backup_container || return $?
     child="$timestamp-$$"
-    BACKUP_ROOT="backups/$child"
+    BACKUP_ROOT_NAME=$child
     storage_pin=$(create_pinned_state_storage "$BACKUPS_ROOT_PHYSICAL" \
         "$BACKUPS_ROOT_IDENTITY" "$child" files '') || return $?
     IFS=$'\t' read -r BACKUP_ROOT_IDENTITY BACKUP_ROOT_PHYSICAL <<<"$storage_pin"
+    BACKUP_ROOT=$BACKUP_ROOT_PHYSICAL
     state_storage_name_matches_pin backups "$BACKUPS_ROOT_PHYSICAL" "$BACKUPS_ROOT_IDENTITY" \
-        "$BACKUP_ROOT" "$BACKUP_ROOT_PHYSICAL" "$BACKUP_ROOT_IDENTITY" || return 74
-    BACKUP_FILES="$BACKUP_ROOT/files"
+        "backups/$child" "$BACKUP_ROOT_PHYSICAL" "$BACKUP_ROOT_IDENTITY" || return 74
+    BACKUP_FILES="$BACKUP_ROOT_PHYSICAL/files"
     [[ -d "$BACKUP_FILES" && ! -L "$BACKUP_FILES" ]] || return 74
-    REPORT_PATH="$BACKUP_ROOT/report.tsv"
+    nested_identity=$(path_identity "$BACKUP_FILES") || return 74
+    BACKUP_FILES_IDENTITY=$nested_identity
+    pinned_directory_matches "$BACKUP_FILES" "$BACKUP_FILES_IDENTITY" || return 74
+    REPORT_PATH="$BACKUP_ROOT_PHYSICAL/report.tsv"
+    REPORT_HOOK_PATH="backups/$child/report.tsv"
     report_creation_path="$BACKUP_ROOT_PHYSICAL/report.tsv"
     [[ -o noclobber ]] && noclobber_was_set=1
     set -C
@@ -1388,14 +1563,14 @@ begin_backup() {
     REPORT_IDENTITY=$(path_identity "$report_creation_path") || return 74
     [[ -n "$REPORT_IDENTITY" ]] || return 74
     state_storage_name_matches_pin backups "$BACKUPS_ROOT_PHYSICAL" "$BACKUPS_ROOT_IDENTITY" \
-        "$BACKUP_ROOT" "$BACKUP_ROOT_PHYSICAL" "$BACKUP_ROOT_IDENTITY" || return 74
+        "backups/$child" "$BACKUP_ROOT_PHYSICAL" "$BACKUP_ROOT_IDENTITY" || return 74
     REPORT_RECOVERY_PARENT_PHYSICAL=$BACKUP_ROOT_PHYSICAL
     REPORT_RECOVERY_PARENT_IDENTITY=$BACKUP_ROOT_IDENTITY
     REPORT_RECOVERY_PATH="$REPORT_RECOVERY_PARENT_PHYSICAL/report-recovery.tsv"
     [[ ! -e "$REPORT_RECOVERY_PATH" && ! -L "$REPORT_RECOVERY_PATH" ]] || return 74
     install_test_hook report_recovery_before_link "$REPORT_RECOVERY_PATH" || return $?
     state_storage_name_matches_pin backups "$BACKUPS_ROOT_PHYSICAL" "$BACKUPS_ROOT_IDENTITY" \
-        "$BACKUP_ROOT" "$BACKUP_ROOT_PHYSICAL" "$BACKUP_ROOT_IDENTITY" || return 74
+        "backups/$child" "$BACKUP_ROOT_PHYSICAL" "$BACKUP_ROOT_IDENTITY" || return 74
     run_without_report_fd "$TRANSACTION_LINK_COMMAND" "$report_creation_path" "$REPORT_RECOVERY_PATH" || return 74
     [[ -f "$REPORT_RECOVERY_PATH" && ! -L "$REPORT_RECOVERY_PATH" ]] || return 74
     REPORT_RECOVERY_IDENTITY=$(path_identity "$REPORT_RECOVERY_PATH") || return 74
@@ -1411,6 +1586,7 @@ close_report_handle() {
 
 report_path_matches_pin() {
     local identity
+    backup_storage_pins_match || return 1
     [[ -n "$REPORT_PATH" && -f "$REPORT_PATH" && ! -L "$REPORT_PATH" ]] || return 1
     identity=$(path_identity "$REPORT_PATH") || return 1
     [[ "$identity" == "$REPORT_IDENTITY" ]]
@@ -1418,6 +1594,7 @@ report_path_matches_pin() {
 
 report_recovery_path_matches_pin() {
     local identity
+    backup_storage_pins_match || return 1
     [[ -n "$REPORT_RECOVERY_PATH" && -f "$REPORT_RECOVERY_PATH" && ! -L "$REPORT_RECOVERY_PATH" ]] || return 1
     identity=$(path_identity "$REPORT_RECOVERY_PATH") || return 1
     [[ "$identity" == "$REPORT_RECOVERY_IDENTITY" && "$identity" == "$REPORT_IDENTITY" ]]
@@ -1446,13 +1623,19 @@ locate_report_recovery_link() (
 )
 
 refresh_report_recovery_location() {
-    local previous_state_physical=$1 expected_name info actual parent_physical parent_identity
+    local expected_name=report-recovery.tsv info actual parent_physical parent_identity expected
     [[ -n "$REPORT_RECOVERY_IDENTITY" ]] || return 0
-    expected_name=${REPORT_RECOVERY_PATH##*/}
-    REPORT_RECOVERY_PATH=$(path_with_replaced_prefix "$REPORT_RECOVERY_PATH" \
-        "$previous_state_physical" "$STATE_ROOT_PHYSICAL") || return 74
-    REPORT_RECOVERY_PARENT_PHYSICAL=$(path_with_replaced_prefix "$REPORT_RECOVERY_PARENT_PHYSICAL" \
-        "$previous_state_physical" "$STATE_ROOT_PHYSICAL") || return 74
+    [[ -n "$BACKUP_ROOT_PHYSICAL" && -n "$BACKUP_ROOT_IDENTITY" ]] || {
+        REPORT_RECOVERY_PATH=''
+        return 74
+    }
+    REPORT_RECOVERY_PARENT_PHYSICAL=$BACKUP_ROOT_PHYSICAL
+    REPORT_RECOVERY_PARENT_IDENTITY=$BACKUP_ROOT_IDENTITY
+    expected="$REPORT_RECOVERY_PARENT_PHYSICAL/$expected_name"
+    if pinned_file_matches "$expected" "$REPORT_RECOVERY_IDENTITY"; then
+        REPORT_RECOVERY_PATH=$expected
+        return 0
+    fi
     report_recovery_path_matches_pin && return 0
     info=$(locate_report_recovery_link) || info=''
     if [[ -z "$info" ]]; then
@@ -1494,14 +1677,14 @@ append_report() {
     state_cwd_matches_pin || return 74
     report_path_matches_pin || return 74
     row=$(printf '%s\t%s\t%s\t%s' "$1" "$2" "$3" "$4") || return 74
-    install_test_hook report_after_handle_check "$record_type" "$REPORT_PATH" || return $?
+    install_test_hook report_after_handle_check "$record_type" "$REPORT_HOOK_PATH" || return $?
     if [[ ${DOTFILES_TESTING:-0} == 1 && ${DOTFILES_TEST_REPORT_PARTIAL_TYPE:-} == "$record_type" ]]; then
         partial_length=$((${#row} / 2))
         [[ $partial_length -gt 0 ]] || partial_length=1
         partial=${row:0:$partial_length}
         printf '%s' "$partial" >&9 || true
         REPORT_WRITE_FAILED=1
-        install_test_hook report_partial_write "$record_type" "$REPORT_PATH" || true
+        install_test_hook report_partial_write "$record_type" "$REPORT_HOOK_PATH" || true
         return 74
     fi
     if ! printf '%s\n' "$row" >&9; then
@@ -1605,7 +1788,7 @@ journal_move() {
     JOURNAL_REPORT_LOCATION[$i]=''
     JOURNAL_PLAN_INDEX[$i]=$plan_index
     JOURNAL_COUNT=$((JOURNAL_COUNT + 1))
-    append_report MOVE_INTENT "$relative_path" "$target_path" "$STATE_ROOT_PHYSICAL/$backup_path"
+    append_report MOVE_INTENT "$relative_path" "$target_path" "$backup_path"
 }
 
 cancel_journal_move() {
@@ -1848,32 +2031,63 @@ path_with_replaced_prefix() {
     esac
 }
 
+path_with_refreshed_storage_prefix() {
+    local path=$1 previous_state=$2 previous_transaction=$3 current_transaction=$4
+    local previous_backup=$5 current_backup=$6
+    if [[ -n "$previous_transaction" && -n "$current_transaction" ]]; then
+        path=$(path_with_replaced_prefix "$path" "$previous_transaction" "$current_transaction") || return 74
+    fi
+    if [[ -n "$previous_backup" && -n "$current_backup" ]]; then
+        path=$(path_with_replaced_prefix "$path" "$previous_backup" "$current_backup") || return 74
+    fi
+    path_with_replaced_prefix "$path" "$previous_state" "$STATE_ROOT_PHYSICAL"
+}
+
 refresh_journal_locations_after_hook() {
     local previous_state_physical=$1 i info actual actual_parent actual_parent_identity actual_name
     local publication_path aux_path unowned_path expected_name status=0
+    local previous_transaction_root=$TRANSACTION_ROOT_PHYSICAL previous_backup_root=$BACKUP_ROOT_PHYSICAL
     refresh_state_physical_from_cwd || return 74
-    refresh_report_recovery_location "$previous_state_physical" || status=74
+    refresh_pinned_state_storage || status=74
+    refresh_report_recovery_location || status=74
     for ((i=0; i<JOURNAL_COUNT; i++)); do
         publication_path=${JOURNAL_PUBLICATION[$i]}
         if [[ -n "$publication_path" ]]; then
-            publication_path=$(path_with_replaced_prefix "$publication_path" "$previous_state_physical" "$STATE_ROOT_PHYSICAL") || return 74
+            publication_path=$(path_with_refreshed_storage_prefix "$publication_path" "$previous_state_physical" \
+                "$previous_transaction_root" "$TRANSACTION_ROOT_PHYSICAL" "$previous_backup_root" \
+                "$BACKUP_ROOT_PHYSICAL") || return 74
             JOURNAL_PUBLICATION[$i]=$publication_path
-            JOURNAL_PUBLICATION_PARENT_PHYSICAL[$i]=$(path_with_replaced_prefix \
-                "${JOURNAL_PUBLICATION_PARENT_PHYSICAL[$i]}" "$previous_state_physical" "$STATE_ROOT_PHYSICAL") || return 74
+            JOURNAL_PUBLICATION_PARENT_PHYSICAL[$i]=$(path_with_refreshed_storage_prefix \
+                "${JOURNAL_PUBLICATION_PARENT_PHYSICAL[$i]}" "$previous_state_physical" \
+                "$previous_transaction_root" "$TRANSACTION_ROOT_PHYSICAL" "$previous_backup_root" \
+                "$BACKUP_ROOT_PHYSICAL") || return 74
         fi
         aux_path=${JOURNAL_AUX[$i]}
         if [[ -n "$aux_path" ]]; then
-            aux_path=$(path_with_replaced_prefix "$aux_path" "$previous_state_physical" "$STATE_ROOT_PHYSICAL") || return 74
+            aux_path=$(path_with_refreshed_storage_prefix "$aux_path" "$previous_state_physical" \
+                "$previous_transaction_root" "$TRANSACTION_ROOT_PHYSICAL" "$previous_backup_root" \
+                "$BACKUP_ROOT_PHYSICAL") || return 74
             JOURNAL_AUX[$i]=$aux_path
-            JOURNAL_AUX_PARENT_PHYSICAL[$i]=$(path_with_replaced_prefix "${JOURNAL_AUX_PARENT_PHYSICAL[$i]}" \
-                "$previous_state_physical" "$STATE_ROOT_PHYSICAL") || return 74
+            JOURNAL_AUX_PARENT_PHYSICAL[$i]=$(path_with_refreshed_storage_prefix \
+                "${JOURNAL_AUX_PARENT_PHYSICAL[$i]}" "$previous_state_physical" \
+                "$previous_transaction_root" "$TRANSACTION_ROOT_PHYSICAL" "$previous_backup_root" \
+                "$BACKUP_ROOT_PHYSICAL") || return 74
         fi
         unowned_path=${JOURNAL_UNOWNED[$i]}
         if [[ -n "$unowned_path" ]]; then
-            unowned_path=$(path_with_replaced_prefix "$unowned_path" "$previous_state_physical" "$STATE_ROOT_PHYSICAL") || return 74
+            unowned_path=$(path_with_refreshed_storage_prefix "$unowned_path" "$previous_state_physical" \
+                "$previous_transaction_root" "$TRANSACTION_ROOT_PHYSICAL" "$previous_backup_root" \
+                "$BACKUP_ROOT_PHYSICAL") || return 74
             JOURNAL_UNOWNED[$i]=$unowned_path
-            JOURNAL_UNOWNED_PARENT_PHYSICAL[$i]=$(path_with_replaced_prefix \
-                "${JOURNAL_UNOWNED_PARENT_PHYSICAL[$i]}" "$previous_state_physical" "$STATE_ROOT_PHYSICAL") || return 74
+            JOURNAL_UNOWNED_PARENT_PHYSICAL[$i]=$(path_with_refreshed_storage_prefix \
+                "${JOURNAL_UNOWNED_PARENT_PHYSICAL[$i]}" "$previous_state_physical" \
+                "$previous_transaction_root" "$TRANSACTION_ROOT_PHYSICAL" "$previous_backup_root" \
+                "$BACKUP_ROOT_PHYSICAL") || return 74
+        fi
+        if [[ "${JOURNAL_TYPE[$i]}" == MOVE && -n "${JOURNAL_SECOND[$i]}" ]]; then
+            JOURNAL_SECOND[$i]=$(path_with_refreshed_storage_prefix "${JOURNAL_SECOND[$i]}" \
+                "$previous_state_physical" "$previous_transaction_root" "$TRANSACTION_ROOT_PHYSICAL" \
+                "$previous_backup_root" "$BACKUP_ROOT_PHYSICAL") || return 74
         fi
 
         if [[ -n "${JOURNAL_PUBLICATION_IDENTITY[$i]}" ]]; then
@@ -1975,6 +2189,32 @@ sibling_relative_path() {
         printf '%s/%s\n' "$parent" "$sibling_name"
     fi
 }
+
+prepare_pinned_backup_parent() (
+    local relative_path=$1 component parent_physical parent_identity physical i
+    local components=()
+    backup_storage_pins_match || return 74
+    cd -P -- "$BACKUP_FILES" || return 74
+    [[ "$(run_without_report_fd /bin/pwd -P)" == "$BACKUP_FILES" ]] || return 74
+    [[ "$(path_identity .)" == "$BACKUP_FILES_IDENTITY" ]] || return 74
+    IFS=/ read -r -a components <<<"$relative_path"
+    for ((i=0; i<${#components[@]}-1; i++)); do
+        component=${components[$i]}
+        if [[ ! -e "$component" && ! -L "$component" ]]; then
+            run_without_report_fd mkdir -- "$component" || return 74
+        fi
+        [[ -d "$component" && ! -L "$component" ]] || return 74
+        parent_physical=$(run_without_report_fd /bin/pwd -P) || return 74
+        cd -P -- "$component" || return 74
+        physical=$(run_without_report_fd /bin/pwd -P) || return 74
+        [[ "$physical" == "$parent_physical/$component" ]] || return 74
+        path_within "$physical" "$BACKUP_FILES" || return 74
+        backup_storage_pins_match || return 74
+    done
+    parent_physical=$(run_without_report_fd /bin/pwd -P) || return 74
+    parent_identity=$(path_identity .) || return 74
+    printf '%s\t%s\n' "$parent_physical" "$parent_identity"
+)
 
 after_transaction_mutation() {
     MUTATION_COUNT=$((MUTATION_COUNT + 1))
@@ -2193,19 +2433,20 @@ stage_backup_target() (
 
 move_staged_backup() (
     local target_path=$1 stage_path=$2 backup_path=$3 expected_fingerprint=$4 expected_stage_identity=$5
-    local stage_name backup_name container_path root_physical stage_identity actual actual_name
+    local expected_backup_parent_identity=$6 stage_name backup_name container_path stage_identity actual actual_name
     local artifact_identity artifact_fingerprint immediate_parent_physical immediate_parent_identity
     local current_parent_physical current_parent_identity status=0 hook_status=0 unowned_info
     arm_subshell_signal_forwarding
     stage_name=${stage_path##*/}
     state_cwd_matches_pin || return 74
     refresh_state_physical_from_cwd || return $?
-    root_physical=$(run_without_report_fd /bin/pwd -P) || return 74
     stage_identity=$(path_identity "$stage_path") || return 74
     [[ "$stage_identity" == "$expected_stage_identity" ]] || return 74
     [[ "$(path_fingerprint "$stage_path" 2>/dev/null || true)" == "$expected_fingerprint" ]] || return 74
     cd -P -- "${backup_path%/*}" || return 74
-    path_within "$(run_without_report_fd /bin/pwd -P)" "$root_physical" || return 74
+    [[ "$(run_without_report_fd /bin/pwd -P)" == "${backup_path%/*}" ]] || return 74
+    [[ "$(path_identity .)" == "$expected_backup_parent_identity" ]] || return 74
+    path_within "$(run_without_report_fd /bin/pwd -P)" "$BACKUP_FILES" || return 74
     backup_name=${backup_path##*/}
     move_no_clobber_exact "$stage_path" "$backup_name" backup_stage_publish || return 74
     if [[ "$MOVE_RESULT_IDENTITY" != "$expected_stage_identity" || \
@@ -2367,17 +2608,20 @@ apply_install_entry() {
     local published_kind published_identity published_fingerprint
     local hook_info hook_status hook_location hook_actual hook_parent hook_parent_identity hook_identity hook_fingerprint
     local previous_state_physical refresh_status temp_fingerprint
-    local backup_display
+    local backup_display backup_parent_info backup_parent_physical backup_parent_identity
 
     state_cwd_matches_pin || return 74
+    previous_state_physical=$STATE_ROOT_PHYSICAL
     inspection=$(inspect_install_entry "$action" "$source" "$target_path" "$relative_path") || return $?
+    refresh_journal_locations_after_hook "$previous_state_physical" || return $?
     IFS=$'\t' read -r fingerprint target_identity parent_physical parent_identity <<<"$inspection"
     [[ -n "$fingerprint" && -n "$target_identity" && -n "$parent_physical" && -n "$parent_identity" ]] || return 65
     PLAN_PARENT_PHYSICAL[$plan_index]=$parent_physical
     PLAN_PARENT_IDENTITY[$plan_index]=$parent_identity
     if [[ "$action" == BACKUP ]]; then
-        backup_path="$BACKUP_FILES/$relative_path"
-        run_without_report_fd mkdir -p -- "$(run_without_report_fd dirname "$backup_path")" || return 74
+        backup_parent_info=$(prepare_pinned_backup_parent "$relative_path") || return $?
+        IFS=$'\t' read -r backup_parent_physical backup_parent_identity <<<"$backup_parent_info"
+        backup_path="$backup_parent_physical/${relative_path##*/}"
         [[ ! -e "$backup_path" && ! -L "$backup_path" ]] || return 74
         journal_index=$JOURNAL_COUNT
         backup_stage="${target_path%/*}/.dotfiles-backup-$$-$journal_index"
@@ -2439,16 +2683,19 @@ apply_install_entry() {
             [[ $refresh_status -eq 0 ]] || return "$refresh_status"
         fi
         [[ $stage_status -eq 0 ]] || return "$stage_status"
-        backup_display="$STATE_ROOT_PHYSICAL/$backup_path"
+        backup_display=$backup_path
         run_journal_aux_hook_boundary "$journal_index" before_backup_move "$target_path" "$backup_display" || return $?
         actual_stage=${JOURNAL_AUX[$journal_index]}
         [[ -n "$actual_stage" ]] || return 74
-        backup_display="$STATE_ROOT_PHYSICAL/$backup_path"
+        backup_path=${JOURNAL_SECOND[$journal_index]}
+        backup_display=$backup_path
         run_journal_aux_hook_boundary "$journal_index" backup_move_after_state_check "$STATE_ROOT" "$backup_display" || return $?
         actual_stage=${JOURNAL_AUX[$journal_index]}
         [[ -n "$actual_stage" ]] || return 74
+        backup_path=${JOURNAL_SECOND[$journal_index]}
         previous_state_physical=$STATE_ROOT_PHYSICAL
-        backup_info=$(move_staged_backup "$target_path" "$actual_stage" "$backup_path" "$fingerprint" "$stage_identity")
+        backup_info=$(move_staged_backup "$target_path" "$actual_stage" "$backup_path" "$fingerprint" "$stage_identity" \
+            "$backup_parent_identity")
         backup_status=$?
         IFS=$'\t' read -r backup_kind published_path actual_parent actual_parent_identity backup_identity backup_fingerprint \
             <<<"$backup_info"
@@ -2486,7 +2733,6 @@ apply_install_entry() {
                 actual_parent_identity=$hook_parent_identity
                 set_journal_publication_location "$journal_index" "$published_path" "$actual_relative" "$actual_parent" \
                     "$actual_parent_identity" "$hook_identity" "$hook_fingerprint"
-                finalize_move_report "$journal_index" "$published_path" || return $?
             else
                 mark_journal_publication_unavailable "$journal_index" || return $?
             fi
@@ -2667,6 +2913,23 @@ move_local_stage_to_quarantine() {
     [[ ! -e "$stage_path" && ! -L "$stage_path" ]] || return 2
 }
 
+prepare_pinned_quarantine_entry() (
+    local child=$1 physical identity
+    case "$child" in ''|*/*|.|..) return 1 ;; esac
+    transaction_storage_pins_match || return 1
+    cd -P -- "$QUARANTINE_ROOT" || return 1
+    [[ "$(run_without_report_fd /bin/pwd -P)" == "$QUARANTINE_ROOT" ]] || return 1
+    [[ "$(path_identity .)" == "$QUARANTINE_ROOT_IDENTITY" ]] || return 1
+    [[ ! -e "$child" && ! -L "$child" ]] || return 1
+    run_without_report_fd mkdir -- "$child" || return 1
+    [[ -d "$child" && ! -L "$child" ]] || return 1
+    cd -P -- "$child" || return 1
+    physical=$(run_without_report_fd /bin/pwd -P) || return 1
+    identity=$(path_identity .) || return 1
+    [[ "$physical" == "$QUARANTINE_ROOT/$child" ]] || return 1
+    printf '%s\t%s\n' "$physical" "$identity"
+)
+
 rollback_one_link_path() {
     local source=$1 path=$2 path_relative=$3 stage_path=$4 quarantine_path=$5 expected_identity=$6 hook_event=$7
     local expected_parent_physical=$8 expected_parent_identity=$9
@@ -2682,9 +2945,10 @@ rollback_link_entry() {
     local publication_path=$7 publication_relative=$8 expected_identity=$9 parent_physical=${10} parent_identity=${11}
     local publication_parent_physical=${12} publication_parent_identity=${13} publication_identity=${14}
     local aux_parent_physical=${15} aux_parent_identity=${16} aux_identity=${17}
-    local quarantine_dir target_dir temp_dir actual_dir entry_status status=0
-    quarantine_dir="$QUARANTINE_ROOT/link-$journal_index"
-    run_without_report_fd mkdir -p -- "$quarantine_dir" || return 1
+    local quarantine_dir quarantine_info quarantine_identity target_dir temp_dir actual_dir entry_status status=0
+    quarantine_info=$(prepare_pinned_quarantine_entry "link-$journal_index") || return 2
+    IFS=$'\t' read -r quarantine_dir quarantine_identity <<<"$quarantine_info"
+    [[ -n "$quarantine_dir" && -n "$quarantine_identity" ]] || return 2
     target_dir=${target_path%/*}
     temp_dir=${temp_path%/*}
     if [[ -n "$publication_identity" && -z "$publication_path" ]]; then
@@ -2817,7 +3081,7 @@ rollback_move_entry() {
     local publication_path=${14} publication_parent_physical=${15} publication_parent_identity=${16}
     local publication_identity=${17} publication_fingerprint=${18}
     local restore_stage backup_display backup_name container_path using_recorded=0
-    backup_display="$STATE_ROOT_PHYSICAL/$backup_path"
+    backup_display=$backup_path
     restore_stage="${target_path%/*}/.dotfiles-restore-$$-$journal_index"
     if [[ -n "$publication_identity" && -z "$publication_path" ]]; then
         return 2
@@ -2927,18 +3191,33 @@ rollback_transaction() {
 }
 
 cleanup_transaction_storage() {
-    [[ -n "$QUARANTINE_ROOT" ]] && run_without_report_fd rmdir -- "$QUARANTINE_ROOT" 2>/dev/null || true
-    [[ -n "$TRANSACTION_ROOT" ]] && run_without_report_fd rmdir -- "$TRANSACTION_ROOT" 2>/dev/null || true
-    run_without_report_fd rmdir -- transactions 2>/dev/null || true
+    if pinned_directory_matches "$QUARANTINE_ROOT" "$QUARANTINE_ROOT_IDENTITY"; then
+        run_without_report_fd rmdir -- "$QUARANTINE_ROOT" 2>/dev/null || true
+    fi
+    if pinned_directory_matches "$TRANSACTION_ROOT_PHYSICAL" "$TRANSACTION_ROOT_IDENTITY"; then
+        run_without_report_fd rmdir -- "$TRANSACTION_ROOT_PHYSICAL" 2>/dev/null || true
+    fi
+    if [[ "$TRANSACTIONS_ROOT_CREATED" == 1 ]] && \
+        pinned_directory_matches "$TRANSACTIONS_ROOT_PHYSICAL" "$TRANSACTIONS_ROOT_IDENTITY"; then
+        run_without_report_fd rmdir -- "$TRANSACTIONS_ROOT_PHYSICAL" 2>/dev/null || true
+    fi
+    if [[ "$BACKUPS_ROOT_CREATED" == 1 ]] && \
+        pinned_directory_matches "$BACKUPS_ROOT_PHYSICAL" "$BACKUPS_ROOT_IDENTITY"; then
+        run_without_report_fd rmdir -- "$BACKUPS_ROOT_PHYSICAL" 2>/dev/null || true
+    fi
 }
 
 cleanup_success_transaction_storage() {
     state_cwd_matches_pin || return 74
-    [[ -n "$QUARANTINE_ROOT" ]] || return 74
+    transaction_storage_pins_match || return 74
     run_without_report_fd rmdir -- "$QUARANTINE_ROOT" || return 74
-    run_without_report_fd rmdir -- "$TRANSACTION_ROOT" || return 74
-    run_without_report_fd rmdir -- transactions 2>/dev/null || true
+    run_without_report_fd rmdir -- "$TRANSACTION_ROOT_PHYSICAL" || return 74
+    if [[ "$TRANSACTIONS_ROOT_CREATED" == 1 ]]; then
+        pinned_directory_matches "$TRANSACTIONS_ROOT_PHYSICAL" "$TRANSACTIONS_ROOT_IDENTITY" || return 74
+        run_without_report_fd rmdir -- "$TRANSACTIONS_ROOT_PHYSICAL" || return 74
+    fi
     TRANSACTION_ROOT=''
+    TRANSACTION_ROOT_PHYSICAL=''
     QUARANTINE_ROOT=''
 }
 
@@ -2974,7 +3253,10 @@ start_transaction() {
     trap 'record_transaction_signal 143' TERM
     pin_planned_install_root || return $?
     pin_state_root || return $?
-    [[ "$PLAN_NEEDS_BACKUP" == 0 ]] || preflight_backup_devices || return $?
+    if [[ "$PLAN_NEEDS_BACKUP" == 1 ]]; then
+        prepare_backup_container || return $?
+        preflight_backup_devices || return $?
+    fi
     honor_pending_signal || return $?
     acquire_lock || return $?
     begin_transaction_storage || return $?

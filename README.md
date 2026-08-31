@@ -120,8 +120,10 @@ checkout are created. Directory/type conflicts remain blocked even with
 `--backup`. `install --apply` without `--backup` can link missing targets but
 refuses existing regular files and foreign links.
 
-Backup moves require each existing target parent and the pinned state root to
-be on the same filesystem. A cross-filesystem plan is rejected before any home
+Backup moves require each existing target parent and the identity-pinned
+`backups` container to be on the same filesystem. The container is safely
+created and pinned before this preflight, so a nested backup mount is checked
+by its actual device. A cross-filesystem plan is rejected before any home
 target or backup set is changed; the installer does not fall back to copying.
 
 No install command runs a package manager, changes the login shell, enables a
@@ -162,7 +164,10 @@ than deleting without proof.
 
 The managed `transactions` and `backups` children of the pinned state root are
 created or accepted only as real, physically contained directories. Symlinked
-or identity-swapped containers are refused rather than followed.
+or identity-swapped containers are refused rather than followed. Their pinned
+physical identities, and those of the unique transaction, backup, quarantine,
+and backup-files directories, are revalidated across hooks, recovery, report,
+and cleanup operations.
 
 The report is created without clobbering and retained by an open file handle for
 the whole transaction. Each backup set permanently retains a separately pinned
