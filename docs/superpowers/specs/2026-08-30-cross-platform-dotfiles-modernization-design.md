@@ -130,14 +130,18 @@ waybar|arch|file|.config/waybar/config.jsonc|jsonc|yes|0.15
 | `app` | Stable lowercase application/group identifier. |
 | `platforms` | Comma-separated allowlist containing `macos`, `arch`, or both. |
 | `kind` | `file` in schema v1. Other values fail closed. |
-| `path` | Relative path used under both repository `home/` and target home. |
+| `path` | Relative whitespace-free path used under both repository `home/` and target home. |
 | `validator` | Fixed validator ID from an allowlist; never a shell command. |
 | `required` | `yes` or `no`; controls whether a missing canonical artifact is fatal. |
-| `tested_version` | Last upstream/runtime version against which behavior was reviewed. |
+| `tested_version` | `unverified` or one safe semver-style token for the last reviewed upstream/runtime version. |
 
-The parser rejects unknown fields or values, blank required fields, absolute
-paths, `..`, duplicate target paths, pipes or newlines in values, and paths
-that escape either root. Comments begin with `#`; blank lines are ignored.
+Manifest v1 uses LF line endings only. Before parsing or printing any manifest
+data, the parser rejects every other ASCII control byte, including CR, ESC,
+tab, NUL, and DEL, with a line-numbered error. It also rejects unknown fields
+or values, blank required fields, absolute paths, `..`, duplicate target paths,
+pipes, whitespace in identity-bearing paths, version values outside
+`unverified`/semver-style tokens, and paths that escape either root. Comments
+begin with `#`; blank LF-delimited lines are ignored.
 
 The manifest records a reviewed version baseline, not an online “latest
 version.” Checks report installed and reviewed versions but never query package
@@ -201,6 +205,10 @@ machine-readable version row:
 ```text
 VERSION <app> <path> reviewed=<manifest-version> installed=<version|unavailable|not-applicable>
 ```
+
+The manifest grammar guarantees that `<path>` and `<manifest-version>` are
+single control-free tokens. Invalid bytes or whitespace fail before any
+`VERSION`, validation, diff, or plan row can expose manifest text.
 
 Each result uses one of these explicit levels:
 
@@ -267,7 +275,9 @@ ${XDG_STATE_HOME:-$HOME/.local/state}/dotfiles/backups/<UTC timestamp>/
 ```
 
 The relative home path is preserved and an operation report records every move
-and link. The installer acquires a state-directory lock, records mutations, and
+and link. Manifest paths cannot contain tabs, newlines, spaces, or controls, so
+the relative-path field cannot add recovery TSV columns or rows. The installer
+acquires a state-directory lock, records mutations, and
 automatically removes newly created links and restores moved targets if an
 unexpected later operation fails. Existing backup sets are never overwritten.
 

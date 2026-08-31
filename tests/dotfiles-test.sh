@@ -160,6 +160,78 @@ test_manifest_rejects_unknown_required_value() {
     assert_status 65 && assert_contains 'manifest line 1'
 }
 
+test_manifest_rejects_ascii_controls_and_crlf_without_status_spoofing() {
+    local kind result_rows
+    for kind in crlf escape tab; do
+        new_fixture
+        case "$kind" in
+            crlf)
+                printf '# header\ndemo|macos|file|.config/demo/config|plain|yes|1\r\n' >"$TEST_TMP/repo/dotfiles.manifest"
+                ;;
+            escape)
+                printf '# header\ndemo|macos|file|.config/demo/config|plain|yes|1\033[2J\n' >"$TEST_TMP/repo/dotfiles.manifest"
+                ;;
+            tab)
+                printf '# header\ndemo|macos|file|.config/demo/config\tFORGED_STATUS|plain|yes|1\n' >"$TEST_TMP/repo/dotfiles.manifest"
+                ;;
+        esac
+        run_cli check --target macos
+        assert_status 65 && \
+            assert_contains 'manifest line 2: ASCII control byte is forbidden; manifest must use LF line endings' || return 1
+        [[ "$CLI_OUTPUT" != *'FORGED_STATUS'* ]] || return 1
+        ! LC_ALL=C /usr/bin/printf '%s' "$CLI_OUTPUT" | /usr/bin/grep -q '[[:cntrl:]]' || return 1
+        result_rows=$(/usr/bin/printf '%s\n' "$CLI_OUTPUT" | /usr/bin/grep -Ec '^(VERSION|PASS|STATIC PASS|RUNTIME UNVERIFIED|SKIPPED|BLOCKED) ')
+        [[ "$result_rows" -eq 0 ]] || return 1
+    done
+}
+
+test_manifest_rejects_unsafe_tested_version_tokens_without_execution() {
+    local kind tested result_rows
+    for kind in space slash execution; do
+        new_fixture
+        case "$kind" in
+            space) tested='1 BLOCKED_FORGED' ;;
+            slash) tested='1/2' ;;
+            execution) tested='v1;touch$IFS'"$TEST_TMP"'/manifest-version-executed' ;;
+        esac
+        printf '# header\ndemo|macos|file|.config/demo/config|plain|yes|%s\n' "$tested" >"$TEST_TMP/repo/dotfiles.manifest"
+        run_cli check --target macos
+        assert_status 65 && assert_contains 'manifest line 2: invalid tested_version' || return 1
+        [[ "$CLI_OUTPUT" != *'BLOCKED_FORGED'* ]] || return 1
+        result_rows=$(/usr/bin/printf '%s\n' "$CLI_OUTPUT" | /usr/bin/grep -Ec '^(VERSION|PASS|STATIC PASS|RUNTIME UNVERIFIED|SKIPPED|BLOCKED) ')
+        [[ "$result_rows" -eq 0 ]] || return 1
+        assert_not_exists "$TEST_TMP/manifest-version-executed" || return 1
+    done
+}
+
+test_manifest_rejects_whitespace_in_identity_path_before_output() {
+    local result_rows
+    new_fixture
+    printf '# header\ndemo|macos|file|.config/demo/config VERSION_FORGED|plain|yes|1\n' >"$TEST_TMP/repo/dotfiles.manifest"
+    run_cli check --target macos
+    assert_status 65 && assert_contains 'manifest line 2: unsafe path' || return 1
+    [[ "$CLI_OUTPUT" != *'VERSION_FORGED'* ]] || return 1
+    result_rows=$(/usr/bin/printf '%s\n' "$CLI_OUTPUT" | /usr/bin/grep -Ec '^(VERSION|PASS|STATIC PASS|RUNTIME UNVERIFIED|SKIPPED|BLOCKED) ')
+    [[ "$result_rows" -eq 0 ]]
+}
+
+test_manifest_rejects_control_path_before_recovery_tsv_mutation() {
+    local relative_path
+    new_fixture
+    relative_path=$'.config/demo/bad\tpath'
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/$relative_path"
+    printf 'existing\n' >"$TEST_TMP/home/$relative_path"
+    printf 'demo|macos|file|%s|plain|yes|1\n' "$relative_path" >"$TEST_TMP/repo/dotfiles.manifest"
+
+    run_cli install --apply --backup
+    assert_status 65 && \
+        assert_contains 'manifest line 1: ASCII control byte is forbidden; manifest must use LF line endings' || return 1
+    [[ -f "$TEST_TMP/home/$relative_path" && ! -L "$TEST_TMP/home/$relative_path" ]] || return 1
+    [[ "$(<"$TEST_TMP/home/$relative_path")" == existing ]] || return 1
+    assert_not_exists "$TEST_TMP/state"
+}
+
 test_check_blocks_malformed_files_with_available_validators() {
     local validator_bin
     new_fixture
@@ -400,16 +472,15 @@ test_check_missing_source_uses_required_semantics() {
 }
 
 test_check_reports_reviewed_and_safe_installed_versions() {
-    local version_bin reviewed
+    local version_bin
     new_fixture
     version_bin="$TEST_TMP/version-bin"
-    reviewed='v1;touch$IFS'"$TEST_TMP"'/manifest-version-executed'
     mkdir -p "$version_bin" "$TEST_TMP/repo/home/.config/demo"
     printf 'set demo true\n' >"$TEST_TMP/repo/home/.config/demo/fish"
     printf 'safe\n' >"$TEST_TMP/repo/home/.config/demo/zellij"
     printf 'safe\n' >"$TEST_TMP/repo/home/.config/demo/demo"
     printf 'safe\n' >"$TEST_TMP/repo/home/.config/demo/brew"
-    write_manifest "fish|macos|file|.config/demo/fish|fish|yes|$reviewed
+    write_manifest "fish|macos|file|.config/demo/fish|fish|yes|v1.2.3-rc.1+build.7
 zellij|macos|file|.config/demo/zellij|plain|yes|0.45.1
 demo|macos|file|.config/demo/demo|plain|yes|7
 brew|macos|file|.config/demo/brew|plain|yes|8"
@@ -434,13 +505,12 @@ STUB
 
     DOTFILES_TEST_PATH="$version_bin:/usr/bin:/bin" run_cli check --target macos
     assert_status 0 && \
-        assert_contains 'VERSION fish .config/demo/fish reviewed=v1;touch$IFS' && \
+        assert_contains 'VERSION fish .config/demo/fish reviewed=v1.2.3-rc.1+build.7' && \
         assert_contains 'installed=9.8.7' && \
         assert_contains 'VERSION zellij .config/demo/zellij reviewed=0.45.1 installed=unavailable' && \
         assert_contains 'VERSION demo .config/demo/demo reviewed=7 installed=not-applicable' && \
         assert_contains 'VERSION brew .config/demo/brew reviewed=8 installed=not-applicable' || return 1
     [[ "$(/usr/bin/grep -c '^--version$' "$TEST_TMP/fish-calls")" -eq 1 ]] || return 1
-    assert_not_exists "$TEST_TMP/manifest-version-executed" || return 1
     assert_not_exists "$TEST_TMP/package-manager-calls"
 }
 
@@ -1786,6 +1856,10 @@ run_test test_manifest_rejects_unknown_platform
 run_test test_manifest_rejects_unknown_kind
 run_test test_manifest_rejects_unknown_validator
 run_test test_manifest_rejects_unknown_required_value
+run_test test_manifest_rejects_ascii_controls_and_crlf_without_status_spoofing
+run_test test_manifest_rejects_unsafe_tested_version_tokens_without_execution
+run_test test_manifest_rejects_whitespace_in_identity_path_before_output
+run_test test_manifest_rejects_control_path_before_recovery_tsv_mutation
 run_test test_check_blocks_malformed_files_with_available_validators
 run_test test_check_passes_valid_file
 run_test test_check_marks_missing_native_validator_runtime_unverified

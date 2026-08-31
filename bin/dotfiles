@@ -68,15 +68,41 @@ valid_validator() {
 
 safe_relative_path() {
     [[ -n "$1" && "$1" != /* && "$1" != *'|'* ]] || return 1
+    case "$1" in *[[:space:]]*) return 1 ;; esac
     case "/$1/" in *'/../'*|*'/./'*|*'//'*) return 1 ;; esac
     return 0
 }
 
+valid_tested_version() {
+    [[ "$1" == unverified ]] ||
+        [[ "$1" =~ ^[vV]?[0-9]+([.][0-9A-Za-z]+)*(-[0-9A-Za-z-]+([.][0-9A-Za-z-]+)*)?([+][0-9A-Za-z-]+([.][0-9A-Za-z-]+)*)?$ ]]
+}
+
+manifest_control_line() (
+    set -o pipefail
+    LC_ALL=C od -An -tu1 "$1" | LC_ALL=C awk '
+        BEGIN { line = 1 }
+        {
+            for (i = 1; i <= NF; i++) {
+                byte = $i
+                if (byte == 10) {
+                    line++
+                } else if (!bad_line && (byte < 32 || byte == 127)) {
+                    bad_line = line
+                }
+            }
+        }
+        END { if (bad_line) print bad_line }
+    '
+)
+
 parse_manifest() {
-    local file=$1 line line_no=0 app platforms kind path validator required tested extra separators i
+    local file=$1 line line_no=0 app platforms kind path validator required tested extra separators control_line i
     MF_APP=(); MF_PLATFORMS=(); MF_KIND=(); MF_PATH=()
     MF_VALIDATOR=(); MF_REQUIRED=(); MF_TESTED=()
     [[ -r "$file" ]] || die 65 "manifest is not readable: $file"
+    control_line=$(manifest_control_line "$file") || manifest_error 1 'unable to inspect manifest control bytes'
+    [[ -z "$control_line" ]] || manifest_error "$control_line" 'ASCII control byte is forbidden; manifest must use LF line endings'
     while IFS= read -r line || [[ -n "$line" ]]; do
         line_no=$((line_no + 1))
         [[ -z "$line" || "$line" == \#* ]] && continue
@@ -90,6 +116,7 @@ parse_manifest() {
         valid_validator "$validator" || manifest_error "$line_no" 'unknown validator'
         [[ "$required" == yes || "$required" == no ]] || manifest_error "$line_no" 'required must be yes or no'
         [[ -n "$tested" ]] || manifest_error "$line_no" 'tested_version is empty'
+        valid_tested_version "$tested" || manifest_error "$line_no" 'invalid tested_version'
         for ((i=0; i<${#MF_PATH[@]}; i++)); do
             [[ "${MF_PATH[$i]}" != "$path" ]] || manifest_error "$line_no" "duplicate path: $path"
         done

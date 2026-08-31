@@ -68,7 +68,10 @@ allowlist; `check` never evaluates manifest text or queries Homebrew, Pacman, or
 another package manager. `unavailable` means an allowlisted version command
 was missing, failed, or returned no recognizable version. `not-applicable`
 means the target is off-platform or the artifact has no allowlisted version
-probe.
+probe. Manifest v1 is LF-only: CRLF and every other ASCII control byte are
+rejected before any result row is printed. Identity paths may not contain
+whitespace, and reviewed versions are single safe tokens, so `VERSION`, plan,
+and recovery TSV boundaries cannot be forged by manifest data.
 
 Validation confidence labels are deliberately distinct:
 
@@ -173,7 +176,10 @@ reviewed, not an online latest release. Package upgrades are always manual:
 
 Review the resulting `VERSION` rows as local evidence, not as an online latest
 version check. `unavailable` and `not-applicable` must remain explicit until an
-operator safely observes the corresponding installed binary.
+operator safely observes the corresponding installed binary. A manifest
+`tested_version` is either the literal `unverified` or a semver-style token such
+as `0.56.2` or `v1.2.3-rc.1+build.7`; spaces, shell punctuation, and path-like
+values fail closed.
 
 The vendored Yazi recycle-bin plugin follows the same deliberate review flow;
 it is never fetched or updated automatically.
