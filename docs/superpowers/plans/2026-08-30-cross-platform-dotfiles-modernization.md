@@ -1195,6 +1195,7 @@ git commit -m "♻️ preserve Kitty and Zellij behavior cross-platform"
 ### Task 9: Make Fish and Yazi portable and archive the inactive Fontconfig alternative
 
 **Files:**
+- Create: `.gitattributes`
 - Modify: `home/.config/fish/config.fish`
 - Modify: `home/.config/yazi/keymap.toml`
 - Delete: `home/.config/fontconfig/conf.d/99-readability.conf.backup`
@@ -1269,7 +1270,9 @@ exact bytes as
 `docs/compatibility/archive/fontconfig-99-readability-alternative.conf`, then
 remove `99-readability.conf.backup` from `home/`. Exclude the archive from
 `dotfiles.manifest`, retain exact manifest coverage of `home/`, and do not
-change either active Fontconfig file.
+change either active Fontconfig file. Because the historical bytes end with an
+intentional blank line, add a path-scoped `.gitattributes` exception for only
+the archive's `blank-at-eof` check.
 
 - [ ] **Step 6: Run shared-config validation**
 
@@ -1290,7 +1293,7 @@ Expected: every command PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add home/.config/fish/config.fish home/.config/yazi/keymap.toml home/.config/fontconfig docs/compatibility/archive/fontconfig-99-readability-alternative.conf tests/dotfiles-test.sh
+git add .gitattributes home/.config/fish/config.fish home/.config/yazi/keymap.toml home/.config/fontconfig docs/compatibility/archive/fontconfig-99-readability-alternative.conf tests/dotfiles-test.sh
 git commit -m "♻️ make shared shell and file configs portable"
 ```
 

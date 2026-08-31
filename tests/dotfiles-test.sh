@@ -4142,9 +4142,31 @@ test_fontconfig_archive_is_valid_xml() {
     [[ "$(sed -n '1p' "$archive")" == '<?xml version="1.0"?>' ]] || return 1
     grep -Fqx '<fontconfig>' "$archive" || return 1
     [[ "$(awk 'NF { line=$0 } END { print line }' "$archive")" == '</fontconfig>' ]] || return 1
-    if command -v xmllint >/dev/null 2>&1; then
-        xmllint --noout "$archive"
+    command -v xmllint >/dev/null 2>&1 || \
+        fail 'xmllint is required for Fontconfig archive validation' || return 1
+    xmllint --noout "$archive"
+}
+
+test_fontconfig_archive_xml_validation_requires_xmllint() {
+    local tools_bin output status tool
+
+    new_fixture
+    tools_bin="$TEST_TMP/xml-tools"
+    mkdir -p "$tools_bin"
+    for tool in dirname sed grep awk; do
+        ln -s "$(command -v "$tool")" "$tools_bin/$tool"
+    done
+
+    if output="$(PATH="$tools_bin" /bin/bash "$PROJECT_ROOT/tests/dotfiles-test.sh" \
+        test_fontconfig_archive_is_valid_xml 2>&1)"; then
+        status=0
+    else
+        status=$?
     fi
+    [[ "$status" -ne 0 ]] || \
+        fail "archive XML test passed without xmllint: $output" || return 1
+    [[ "$output" == *'xmllint is required for Fontconfig archive validation'* ]] || \
+        fail "missing explicit xmllint requirement: $output"
 }
 
 test_fontconfig_archive_materially_differs_from_active() {
@@ -4191,11 +4213,32 @@ test_fontconfig_has_one_deployed_readability_config_and_no_managed_backup() {
 }
 
 test_manifest_exactly_covers_managed_home() {
-    local declared managed
+    local declared managed non_regular
 
+    non_regular="$(cd "$PROJECT_ROOT/home" && \
+        find . -mindepth 1 ! -type d ! -type f -print | sed 's#^\./##' | LC_ALL=C sort)" || return 1
+    [[ -z "$non_regular" ]] || \
+        fail "non-regular managed home entries: $non_regular" || return 1
     declared="$(awk -F'|' '!/^#/ && NF { print $4 }' "$PROJECT_ROOT/dotfiles.manifest" | LC_ALL=C sort)" || return 1
     managed="$(cd "$PROJECT_ROOT/home" && find . -type f -print | sed 's#^\./##' | LC_ALL=C sort)" || return 1
     [[ "$declared" == "$managed" ]] || fail "manifest/home coverage differs; declared: $declared; managed: $managed"
+}
+
+test_manifest_exact_coverage_rejects_non_regular_managed_entry() {
+    local output
+
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    ln -s config "$TEST_TMP/repo/home/.config/demo/undeclared-link"
+
+    if output="$(PROJECT_ROOT="$TEST_TMP/repo" test_manifest_exactly_covers_managed_home 2>&1)"; then
+        fail 'manifest coverage accepted a non-regular managed-home entry'
+        return 1
+    fi
+    [[ "$output" == *'non-regular managed home entries'* ]] || \
+        fail "manifest coverage failed for the wrong reason: $output"
 }
 
 test_hyprland_animations_preserve_values_and_curve_types() {
@@ -4578,10 +4621,12 @@ run_test test_shared_terminal_behavior_is_canonical
 run_test test_shared_fish_yazi_and_fontconfig_are_portable
 run_test test_fontconfig_archive_preserves_exact_historical_bytes
 run_test test_fontconfig_archive_is_valid_xml
+run_test test_fontconfig_archive_xml_validation_requires_xmllint
 run_test test_fontconfig_archive_materially_differs_from_active
 run_test test_fontconfig_active_files_remain_byte_stable
 run_test test_fontconfig_has_one_deployed_readability_config_and_no_managed_backup
 run_test test_manifest_exactly_covers_managed_home
+run_test test_manifest_exact_coverage_rejects_non_regular_managed_entry
 run_test test_documentation_records_operations_and_compatibility_evidence
 validate_selected_tests
 printf '%s passed; %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
