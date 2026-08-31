@@ -27,7 +27,7 @@ PLAN_NEEDS_BACKUP=0
 STATE_ROOT=''; STATE_ROOT_PHYSICAL=''; STATE_ROOT_IDENTITY=''; TRANSACTION_START_DIR=''
 INSTALL_ROOT_PHYSICAL=''; INSTALL_ROOT_IDENTITY=''
 PINNED_INSTALL_PATH=(); PINNED_INSTALL_PHYSICAL=(); PINNED_INSTALL_IDENTITY=(); PINNED_INSTALL_COUNT=0
-LOCK_PATH='install.lock'; LOCK_HELD=0
+LOCK_PATH='install.lock'; LOCK_HELD=0; LOCK_PHYSICAL=''; LOCK_IDENTITY=''
 TRANSACTIONS_ROOT_PHYSICAL=''; TRANSACTIONS_ROOT_IDENTITY=''
 BACKUPS_ROOT_PHYSICAL=''; BACKUPS_ROOT_IDENTITY=''
 TRANSACTION_ROOT_PHYSICAL=''; TRANSACTION_ROOT_IDENTITY=''
@@ -53,7 +53,7 @@ JOURNAL_UNOWNED=(); JOURNAL_UNOWNED_PARENT_PHYSICAL=(); JOURNAL_UNOWNED_PARENT_I
 JOURNAL_UNOWNED_IDENTITY=(); JOURNAL_UNOWNED_FINGERPRINT=(); JOURNAL_UNOWNED_REPORTED=()
 JOURNAL_REPORT_SOURCE=(); JOURNAL_REPORT_LOCATION=(); JOURNAL_PLAN_INDEX=()
 JOURNAL_COUNT=0; MUTATION_COUNT=0; TEST_FAIL_AFTER=''; PRECOMMIT_CLEANUP_HOOK_RAN=0
-TRANSACTION_ACTIVE=0; CLEANUP_ACTIVE=0; PENDING_SIGNAL=0; TRANSACTION_OWNER_PID=$$
+TRANSACTION_ACTIVE=0; CLEANUP_ACTIVE=0; RECOVERY_ACTIVE=0; PENDING_SIGNAL=0; TRANSACTION_OWNER_PID=$$
 TRANSACTION_STAT_STYLE=''; TRANSACTION_STAT_COMMAND=''
 TRANSACTION_MOVE_STYLE=''; TRANSACTION_MOVE_COMMAND=''
 TRANSACTION_LINK_COMMAND=''
@@ -931,6 +931,7 @@ reset_transaction_journal() {
     MUTATION_COUNT=0
     PENDING_SIGNAL=0
     PRECOMMIT_CLEANUP_HOOK_RAN=0
+    RECOVERY_ACTIVE=0
     REPORT_PATH=''; REPORT_HOOK_PATH=''; REPORT_IDENTITY=''; REPORT_RECOVERY_PATH=''; REPORT_RECOVERY_IDENTITY=''
     REPORT_RECOVERY_PARENT_PHYSICAL=''; REPORT_RECOVERY_PARENT_IDENTITY=''
     REPORT_FD_OPEN=0; REPORT_WRITE_FAILED=0
@@ -943,6 +944,7 @@ reset_transaction_journal() {
     TRANSACTIONS_ROOT_CREATED=0; BACKUPS_ROOT_CREATED=0
     TRANSACTION_ROOT_NAME=''; BACKUP_ROOT_NAME=''
     MOVE_RESULT_NOOP=0; MOVE_RESULT_AMBIGUOUS=0
+    LOCK_HELD=0; LOCK_PHYSICAL=''; LOCK_IDENTITY=''
     TEST_FAIL_AFTER=''
     if [[ ${DOTFILES_TESTING:-0} == 1 ]]; then
         TEST_FAIL_AFTER=${DOTFILES_TEST_FAIL_AFTER:-}
@@ -1099,6 +1101,9 @@ move_no_clobber_exact() {
     MOVE_RESULT_IDENTITY=''; MOVE_RESULT_FINGERPRINT=''
     MOVE_RESULT_NOOP=0; MOVE_RESULT_AMBIGUOUS=0
     install_test_hook move_before_syscall "$operation" "$source" "$destination" || return $?
+    case "$operation" in
+        backup_target_stage|backup_stage_publish|link_publish) require_lock_identity || return $? ;;
+    esac
     nested="$destination/${source##*/}"
     candidates[0]=$source
     candidates[1]=$destination
@@ -1273,6 +1278,7 @@ pin_state_container() {
     local name=$1 pin identity physical created=0
     state_cwd_matches_pin && state_name_matches_pin || return 74
     if [[ ! -e "$name" && ! -L "$name" ]]; then
+        require_lock_identity || return $?
         run_without_report_fd mkdir -- "$name" || return 74
         created=1
     fi
@@ -1298,14 +1304,19 @@ create_pinned_state_storage() (
     current_physical=$(run_without_report_fd /bin/pwd -P) || return 74
     [[ "$current_identity" == "$container_identity" && "$current_physical" == "$container_physical" ]] || return 74
     [[ ! -e "$child" && ! -L "$child" ]] || return 74
+    require_lock_identity || return $?
     run_without_report_fd mkdir -- "$child" || return 74
-    [[ -z "$mode" ]] || run_without_report_fd chmod "$mode" "$child" || return 74
+    if [[ -n "$mode" ]]; then
+        require_lock_identity || return $?
+        run_without_report_fd chmod "$mode" "$child" || return 74
+    fi
     cd -P -- "$child" || return 74
     child_identity=$(path_identity .) || return 74
     child_physical=$(run_without_report_fd /bin/pwd -P) || return 74
     [[ "$child_physical" == "$container_physical/$child" ]] || return 74
     if [[ -n "$nested" ]]; then
         [[ ! -e "$nested" && ! -L "$nested" ]] || return 74
+        require_lock_identity || return $?
         run_without_report_fd mkdir -- "$nested" || return 74
         [[ -d "$nested" && ! -L "$nested" ]] || return 74
     fi
@@ -1506,6 +1517,7 @@ arm_subshell_signal_forwarding() {
 }
 
 acquire_lock() {
+    local lock_pin
     state_cwd_matches_pin || return 74
     install_test_hook before_lock_acquire "$STATE_ROOT" || return $?
     honor_pending_signal || return $?
@@ -1516,26 +1528,178 @@ acquire_lock() {
         printf '%s: another install is active: %s/install.lock\n' "$PROGRAM" "$STATE_ROOT" >&2
         return 75
     fi
+    lock_pin=$(capture_directory_pin "$LOCK_PATH") || {
+        report_lock_identity_loss
+        return 74
+    }
+    IFS=$'\t' read -r LOCK_IDENTITY LOCK_PHYSICAL <<<"$lock_pin"
+    [[ -n "$LOCK_IDENTITY" && "$LOCK_PHYSICAL" == "$STATE_ROOT_PHYSICAL/$LOCK_PATH" ]] || {
+        report_lock_identity_loss
+        return 74
+    }
+    lock_name_matches_pin || {
+        report_lock_identity_loss
+        return 74
+    }
     honor_pending_signal || return $?
     install_test_hook after_lock_acquire "$STATE_ROOT" "$STATE_ROOT_PHYSICAL" || return $?
     honor_pending_signal || return $?
+    require_lock_identity || return $?
     state_cwd_matches_pin && state_name_matches_pin || return 74
 }
 
+lock_name_matches_pin() {
+    local lock_path identity physical
+    [[ "$LOCK_HELD" == 1 && -n "$LOCK_IDENTITY" && -n "$LOCK_PHYSICAL" ]] || return 1
+    state_physical_matches_pin || return 1
+    lock_path="$STATE_ROOT_PHYSICAL/$LOCK_PATH"
+    [[ -d "$lock_path" && ! -L "$lock_path" ]] || return 1
+    identity=$(path_identity "$lock_path") || return 1
+    [[ "$identity" == "$LOCK_IDENTITY" ]] || return 1
+    physical=$(physical_dir "$lock_path") || return 1
+    [[ "$physical" == "$lock_path" ]]
+}
+
+report_lock_identity_loss() {
+    local lock_path identity
+    lock_path="$STATE_ROOT_PHYSICAL/$LOCK_PATH"
+    if [[ ! -e "$lock_path" && ! -L "$lock_path" ]]; then
+        printf '%s: install lock disappeared before release: %s\n' "$PROGRAM" "$lock_path" >&2
+    elif [[ -L "$lock_path" ]]; then
+        printf '%s: install lock became a symlink; replacement was not removed: %s\n' \
+            "$PROGRAM" "$lock_path" >&2
+    elif [[ ! -d "$lock_path" ]]; then
+        printf '%s: install lock is no longer a directory; replacement was not removed: %s\n' \
+            "$PROGRAM" "$lock_path" >&2
+    else
+        identity=$(path_identity "$lock_path" 2>/dev/null || true)
+        if [[ -n "$LOCK_IDENTITY" && -n "$identity" && "$identity" != "$LOCK_IDENTITY" ]]; then
+            printf '%s: install lock identity changed; replacement was not removed: %s\n' \
+                "$PROGRAM" "$lock_path" >&2
+        else
+            printf '%s: install lock physical identity is unavailable; current path was not removed: %s\n' \
+                "$PROGRAM" "$lock_path" >&2
+        fi
+    fi
+}
+
+require_lock_identity() {
+    if state_cwd_matches_pin; then
+        refresh_state_physical_from_cwd || {
+            report_lock_identity_loss
+            return 74
+        }
+    fi
+    lock_name_matches_pin && return 0
+    report_lock_identity_loss
+    return 74
+}
+
 release_lock() {
+    local lock_path release_path nested_path move_status=0 restore_status=0
+    local claimed_path claimed_identity claimed_fingerprint foreign_path foreign_identity foreign_fingerprint info
     [[ "$LOCK_HELD" == 1 ]] || return 0
-    state_cwd_matches_pin || return 74
-    if run_without_report_fd rmdir -- "$LOCK_PATH"; then
+    if state_cwd_matches_pin; then
+        refresh_state_physical_from_cwd || {
+            report_lock_identity_loss
+            return 74
+        }
+    fi
+    if ! lock_name_matches_pin; then
+        report_lock_identity_loss
+        return 74
+    fi
+    lock_path="$STATE_ROOT_PHYSICAL/$LOCK_PATH"
+    release_path="$STATE_ROOT_PHYSICAL/.install.lock.release-$$"
+    if [[ -e "$release_path" || -L "$release_path" ]]; then
+        printf '%s: private install lock release path is occupied; lock was not removed: %s\n' \
+            "$PROGRAM" "$release_path" >&2
+        return 74
+    fi
+    install_test_hook release_lock_before_move "$lock_path" "$release_path" || return $?
+    move_no_clobber_exact "$lock_path" "$release_path" lock_release_claim || move_status=$?
+    claimed_path=$MOVE_RESULT_PATH
+    claimed_identity=$MOVE_RESULT_IDENTITY
+    claimed_fingerprint=$MOVE_RESULT_FINGERPRINT
+    nested_path="$release_path/${lock_path##*/}"
+    if [[ $move_status -ne 0 ]]; then
+        if pinned_directory_matches "$lock_path" "$LOCK_IDENTITY"; then
+            claimed_path=$lock_path
+        elif pinned_directory_matches "$release_path" "$LOCK_IDENTITY"; then
+            claimed_path=$release_path
+        elif pinned_directory_matches "$nested_path" "$LOCK_IDENTITY"; then
+            claimed_path=$nested_path
+        else
+            claimed_path="path unavailable identity=$LOCK_IDENTITY"
+        fi
+        printf '%s: acquired install lock could not be exactly claimed for release; retained without removal at: %s\n' \
+            "$PROGRAM" "$claimed_path" >&2
+        return 74
+    fi
+    if [[ "$claimed_identity" == "$LOCK_IDENTITY" && "$claimed_fingerprint" == D && \
+        "$claimed_path" == "$release_path" ]]; then
+        pinned_directory_matches "$release_path" "$LOCK_IDENTITY" || return 74
+        if ! run_without_report_fd rmdir -- "$release_path"; then
+            printf '%s: claimed install lock could not be removed from its private release path: %s\n' \
+                "$PROGRAM" "$release_path" >&2
+            return 74
+        fi
         LOCK_HELD=0
+        LOCK_PHYSICAL=''
+        LOCK_IDENTITY=''
         return 0
     fi
-    printf '%s: failed to release install lock in pinned state root\n' "$PROGRAM" >&2
+    if [[ "$claimed_identity" == "$LOCK_IDENTITY" ]]; then
+        printf '%s: acquired install lock was retained without removal at: %s\n' \
+            "$PROGRAM" "${claimed_path:-path unavailable identity=$LOCK_IDENTITY}" >&2
+        return 74
+    fi
+
+    foreign_path=$claimed_path
+    foreign_identity=$claimed_identity
+    foreign_fingerprint=$claimed_fingerprint
+    if [[ -z "$foreign_path" || -z "$foreign_identity" || -z "$foreign_fingerprint" ]]; then
+        printf '%s: install lock identity changed during release; foreign replacement location is unavailable and nothing was removed\n' \
+            "$PROGRAM" >&2
+        return 74
+    fi
+    if [[ ! -e "$lock_path" && ! -L "$lock_path" ]]; then
+        move_no_clobber_exact "$foreign_path" "$lock_path" lock_release_restore || restore_status=$?
+        if [[ $restore_status -eq 0 && "$MOVE_RESULT_IDENTITY" == "$foreign_identity" && \
+            "$MOVE_RESULT_FINGERPRINT" == "$foreign_fingerprint" && -n "$MOVE_RESULT_PATH" ]]; then
+            foreign_path=$MOVE_RESULT_PATH
+        else
+            info=$(capture_move_candidate "$foreign_path" "$foreign_identity" "$foreign_fingerprint") || info=''
+            if [[ -z "$info" ]]; then
+                info=$(capture_move_candidate "$lock_path" "$foreign_identity" "$foreign_fingerprint") || info=''
+            fi
+            if [[ -z "$info" ]]; then
+                info=$(capture_move_candidate "$lock_path/${foreign_path##*/}" \
+                    "$foreign_identity" "$foreign_fingerprint") || info=''
+            fi
+            if [[ -n "$info" ]]; then
+                IFS=$'\t' read -r foreign_path _ _ _ _ <<<"$info"
+            else
+                foreign_path="path unavailable identity=$foreign_identity"
+            fi
+        fi
+    else
+        restore_status=74
+    fi
+    if [[ "$foreign_path" == "$lock_path" ]]; then
+        printf '%s: install lock identity changed during release; replacement was restored without removal: %s\n' \
+            "$PROGRAM" "$lock_path" >&2
+    else
+        printf '%s: install lock identity changed during release; replacement was retained without removal at: %s\n' \
+            "$PROGRAM" "$foreign_path" >&2
+    fi
     return 74
 }
 
 begin_transaction_storage() {
     local timestamp container_pin storage_pin child nested_identity
     state_cwd_matches_pin && state_name_matches_pin || return 74
+    require_lock_identity || return $?
     timestamp=$(run_without_report_fd date -u +%Y%m%dT%H%M%SZ) || return 74
     container_pin=$(pin_state_container transactions) || return $?
     IFS=$'\t' read -r TRANSACTIONS_ROOT_IDENTITY TRANSACTIONS_ROOT_PHYSICAL TRANSACTIONS_ROOT_CREATED <<<"$container_pin"
@@ -1559,6 +1723,7 @@ begin_transaction_storage() {
 begin_backup() {
     local timestamp noclobber_was_set=0 open_status=0 storage_pin child report_creation_path nested_identity
     state_cwd_matches_pin && state_name_matches_pin || return 74
+    require_lock_identity || return $?
     timestamp=$(run_without_report_fd date -u +%Y%m%dT%H%M%SZ) || return 74
     prepare_backup_container || return $?
     child="$timestamp-$$"
@@ -1578,6 +1743,7 @@ begin_backup() {
     REPORT_HOOK_PATH="backups/$child/report.tsv"
     report_creation_path="$BACKUP_ROOT_PHYSICAL/report.tsv"
     [[ -o noclobber ]] && noclobber_was_set=1
+    require_lock_identity || return $?
     set -C
     exec 9>"$report_creation_path" || open_status=$?
     [[ $noclobber_was_set -eq 1 ]] || set +C
@@ -1593,8 +1759,10 @@ begin_backup() {
     REPORT_RECOVERY_PATH="$REPORT_RECOVERY_PARENT_PHYSICAL/report-recovery.tsv"
     [[ ! -e "$REPORT_RECOVERY_PATH" && ! -L "$REPORT_RECOVERY_PATH" ]] || return 74
     install_test_hook report_recovery_before_link "$REPORT_RECOVERY_PATH" || return $?
+    require_lock_identity || return $?
     state_storage_name_matches_pin backups "$BACKUPS_ROOT_PHYSICAL" "$BACKUPS_ROOT_IDENTITY" \
         "backups/$child" "$BACKUP_ROOT_PHYSICAL" "$BACKUP_ROOT_IDENTITY" || return 74
+    require_lock_identity || return $?
     run_without_report_fd "$TRANSACTION_LINK_COMMAND" "$report_creation_path" "$REPORT_RECOVERY_PATH" || return 74
     [[ -f "$REPORT_RECOVERY_PATH" && ! -L "$REPORT_RECOVERY_PATH" ]] || return 74
     REPORT_RECOVERY_IDENTITY=$(path_identity "$REPORT_RECOVERY_PATH") || return 74
@@ -1706,11 +1874,13 @@ append_report() {
         partial_length=$((${#row} / 2))
         [[ $partial_length -gt 0 ]] || partial_length=1
         partial=${row:0:$partial_length}
+        [[ "$RECOVERY_ACTIVE" == 1 ]] || require_lock_identity || return $?
         printf '%s' "$partial" >&9 || true
         REPORT_WRITE_FAILED=1
         install_test_hook report_partial_write "$record_type" "$REPORT_HOOK_PATH" || true
         return 74
     fi
+    [[ "$RECOVERY_ACTIVE" == 1 ]] || require_lock_identity || return $?
     if ! printf '%s\n' "$row" >&9; then
         REPORT_WRITE_FAILED=1
         return 74
@@ -2207,6 +2377,7 @@ run_journal_aux_hook_boundary() {
     honor_pending_signal || return $?
     [[ $hook_status -eq 0 ]] || return "$hook_status"
     [[ $refresh_status -eq 0 ]] || return "$refresh_status"
+    require_lock_identity || return $?
 }
 
 sibling_relative_path() {
@@ -2230,6 +2401,7 @@ prepare_pinned_backup_parent() (
     for ((i=0; i<${#components[@]}-1; i++)); do
         component=${components[$i]}
         if [[ ! -e "$component" && ! -L "$component" ]]; then
+            require_lock_identity || return $?
             run_without_report_fd mkdir -- "$component" || return 74
         fi
         [[ -d "$component" && ! -L "$component" ]] || return 74
@@ -2247,6 +2419,7 @@ prepare_pinned_backup_parent() (
 
 after_transaction_mutation() {
     MUTATION_COUNT=$((MUTATION_COUNT + 1))
+    require_lock_identity || return $?
     if [[ ${DOTFILES_TESTING:-0} == 1 && -n "$TEST_FAIL_AFTER" && "$MUTATION_COUNT" -eq "$TEST_FAIL_AFTER" ]]; then
         printf '%s: injected transaction failure after mutation %s\n' "$PROGRAM" "$MUTATION_COUNT" >&2
         return 70
@@ -2259,6 +2432,7 @@ prepare_install_parent() {
 
     install_root_name_matches_pin && pinned_install_names_match || return 1
     install_test_hook before_prepare_parent "$EFFECTIVE_HOME" || return 1
+    require_lock_identity || return $?
     install_root_name_matches_pin && pinned_install_names_match || return 1
     cd -P -- "$EFFECTIVE_HOME" || return 1
     physical=$(pwd -P) || return 1
@@ -2274,6 +2448,7 @@ prepare_install_parent() {
         if [[ -e "$component" ]]; then
             [[ -d "$component" ]] || return 1
         else
+            require_lock_identity || return $?
             run_without_report_fd mkdir -- "$component" || return 1
         fi
         [[ -d "$component" && ! -L "$component" ]] || return 1
@@ -2382,6 +2557,7 @@ stage_backup_target() (
     [[ "$(path_identity "$target_name" 2>/dev/null || true)" == "$expected_target_identity" ]] || return 65
     [[ "$(path_fingerprint "$target_name" 2>/dev/null || true)" == "$expected_fingerprint" ]] || return 65
     install_test_hook before_backup_stage "$target_path" "$stage_path" "$recovery_path" || return $?
+    require_lock_identity || return $?
     publication_parent_matches_pin "$target_path" "$expected_parent_physical" "$expected_parent_identity" || return 65
     [[ "$(path_identity "$target_name" 2>/dev/null || true)" == "$expected_target_identity" ]] || return 65
     [[ "$(path_fingerprint "$target_name" 2>/dev/null || true)" == "$expected_fingerprint" ]] || return 65
@@ -2534,6 +2710,7 @@ create_link_temp() (
     [[ ! -e "$target_name" && ! -L "$target_name" && ! -e "$temp_name" && ! -L "$temp_name" ]] || return 65
     install_test_hook before_link_temp "$target_path" "$temp_path" || return $?
     honor_pending_signal || return $?
+    require_lock_identity || return $?
     publication_parent_matches_pin "$target_path" "$expected_parent_physical" "$expected_parent_identity" || return 65
     [[ ! -e "$target_name" && ! -L "$target_name" && ! -e "$temp_name" && ! -L "$temp_name" ]] || return 65
     safe_source "$source" || return 65
@@ -2575,6 +2752,7 @@ publish_link_temp() (
         [[ $hook_status -eq 0 ]] || return "$hook_status"
         return 74
     fi
+    require_lock_identity || return $?
     publication_parent_matches_pin "$target_path" "$expected_parent_physical" "$expected_parent_identity" || {
         printf 'AUX\t%s\t%s\t%s\t%s\t%s\n' "$temp_actual" "$temp_parent" "$temp_parent_identity" \
             "$expected_identity" "L:$source"
@@ -2643,6 +2821,7 @@ apply_install_entry() {
     previous_state_physical=$STATE_ROOT_PHYSICAL
     inspection=$(inspect_install_entry "$action" "$source" "$target_path" "$relative_path") || return $?
     refresh_journal_locations_after_hook "$previous_state_physical" || return $?
+    require_lock_identity || return $?
     IFS=$'\t' read -r fingerprint target_identity parent_physical parent_identity <<<"$inspection"
     [[ -n "$fingerprint" && -n "$target_identity" && -n "$parent_physical" && -n "$parent_identity" ]] || return 65
     PLAN_PARENT_PHYSICAL[$plan_index]=$parent_physical
@@ -2710,6 +2889,7 @@ apply_install_entry() {
             honor_pending_signal || return $?
             [[ $hook_status -eq 0 ]] || return "$hook_status"
             [[ $refresh_status -eq 0 ]] || return "$refresh_status"
+            require_lock_identity || return $?
         fi
         [[ $stage_status -eq 0 ]] || return "$stage_status"
         backup_display=$backup_path
@@ -2736,6 +2916,7 @@ apply_install_entry() {
             honor_pending_signal || return $?
             [[ $backup_status -ne 0 ]] && return "$backup_status"
             [[ $refresh_status -eq 0 ]] || return "$refresh_status"
+            require_lock_identity || return $?
             return 74
         fi
         [[ "$backup_kind" == OWNED || -z "$backup_kind" ]] || return 74
@@ -2770,6 +2951,7 @@ apply_install_entry() {
             honor_pending_signal || return $?
             [[ $hook_status -eq 0 ]] || return "$hook_status"
             [[ $refresh_status -eq 0 ]] || return "$refresh_status"
+            require_lock_identity || return $?
         fi
         [[ $backup_status -eq 0 ]] || return "$backup_status"
         after_transaction_mutation || return $?
@@ -2804,6 +2986,7 @@ apply_install_entry() {
     honor_pending_signal || return $?
     [[ $hook_status -eq 0 ]] || return "$hook_status"
     [[ $refresh_status -eq 0 ]] || return "$refresh_status"
+    require_lock_identity || return $?
     run_journal_aux_hook_boundary "$journal_index" before_link_publish "$target_path" "$temp_path" || return $?
     temp_path=${JOURNAL_AUX[$journal_index]}
     [[ -n "$temp_path" ]] || return 74
@@ -2834,6 +3017,7 @@ apply_install_entry() {
     refresh_journal_locations_after_hook "$previous_state_physical" || refresh_status=$?
     honor_pending_signal || return $?
     [[ $refresh_status -eq 0 ]] || return "$refresh_status"
+    require_lock_identity || return $?
     if [[ $publish_status -eq 0 ]]; then
         previous_state_physical=$STATE_ROOT_PHYSICAL
         hook_info=$(run_artifact_hook_with_refresh after_link_publish "$published_path" "$actual_parent" \
@@ -2852,6 +3036,7 @@ apply_install_entry() {
         honor_pending_signal || return $?
         [[ $hook_status -eq 0 ]] || return "$hook_status"
         [[ $refresh_status -eq 0 ]] || return "$refresh_status"
+        require_lock_identity || return $?
     fi
     [[ $publish_status -eq 0 ]] || return "$publish_status"
     after_transaction_mutation || return $?
@@ -3237,6 +3422,7 @@ cleanup_transaction_storage() {
 }
 
 cleanup_success_transaction_storage() {
+    require_lock_identity || return $?
     state_cwd_matches_pin || return 74
     transaction_storage_pins_match || return 74
     run_without_report_fd rmdir -- "$QUARANTINE_ROOT" || return 74
@@ -3255,6 +3441,7 @@ transaction_trap() {
     trap '' INT TERM
     trap - EXIT
     CLEANUP_ACTIVE=1
+    RECOVERY_ACTIVE=1
     if [[ "$PRECOMMIT_CLEANUP_HOOK_RAN" == 0 ]]; then
         PRECOMMIT_CLEANUP_HOOK_RAN=1
         previous_state_physical=$STATE_ROOT_PHYSICAL
@@ -3282,12 +3469,12 @@ start_transaction() {
     trap 'record_transaction_signal 143' TERM
     pin_planned_install_root || return $?
     pin_state_root || return $?
+    honor_pending_signal || return $?
+    acquire_lock || return $?
     if [[ "$PLAN_NEEDS_BACKUP" == 1 ]]; then
         prepare_backup_container || return $?
         preflight_backup_devices || return $?
     fi
-    honor_pending_signal || return $?
-    acquire_lock || return $?
     begin_transaction_storage || return $?
     honor_pending_signal || return $?
 }
@@ -3295,6 +3482,7 @@ start_transaction() {
 run_precommit_hook_boundary() {
     local event=$1 honor_after=$2 previous_state_physical hook_status=0 refresh_status=0
     shift 2
+    require_lock_identity || return $?
     previous_state_physical=$STATE_ROOT_PHYSICAL
     install_test_hook "$event" "$@" || hook_status=$?
     refresh_journal_locations_after_hook "$previous_state_physical" || refresh_status=$?
@@ -3303,6 +3491,7 @@ run_precommit_hook_boundary() {
     fi
     [[ $hook_status -eq 0 ]] || return "$hook_status"
     [[ $refresh_status -eq 0 ]] || return "$refresh_status"
+    require_lock_identity || return $?
 }
 
 run_precommit_boundaries() {
@@ -3315,16 +3504,21 @@ run_precommit_boundaries() {
 }
 
 commit_transaction() {
+    require_lock_identity || return $?
     honor_pending_signal || return $?
     trap '' INT TERM
     honor_pending_signal || return $?
+    require_lock_identity || return $?
     TRANSACTION_ACTIVE=0
 }
 
 finish_transaction() {
     local status=0
     [[ "$TRANSACTION_ACTIVE" == 0 ]] || return 74
-    test_unlink_public_report_after_final_verification || status=$?
+    require_lock_identity || status=$?
+    if [[ $status -eq 0 ]]; then
+        test_unlink_public_report_after_final_verification || status=$?
+    fi
     if [[ $status -ne 0 ]]; then
         diagnose_report_recovery || true
     fi
@@ -3348,6 +3542,7 @@ apply_install_plan() {
     for ((i=0; i<${#PLAN_ACTION[@]}; i++)); do
         action=${PLAN_ACTION[$i]}
         [[ "$action" == CREATE || "$action" == BACKUP ]] || continue
+        require_lock_identity || return $?
         source=${PLAN_SOURCE[$i]}
         target_path=${PLAN_TARGET[$i]}
         relative_path=${PLAN_PATH[$i]}
@@ -3422,6 +3617,7 @@ verify_install_entry_postcondition() (
 
 verify_install_postconditions() {
     local i action status
+    require_lock_identity || return $?
     install_root_name_matches_pin && pinned_install_names_match || return 65
     state_cwd_matches_pin || return 74
     for ((i=0; i<${#PLAN_ACTION[@]}; i++)); do
@@ -3434,8 +3630,10 @@ verify_install_postconditions() {
             return "$status"
         fi
         install_root_name_matches_pin && pinned_install_names_match || return 65
+        require_lock_identity || return $?
     done
     verify_report_postcondition || return $?
+    require_lock_identity
 }
 
 command_install() {

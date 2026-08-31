@@ -176,6 +176,16 @@ physical identities, and those of the unique transaction, backup, quarantine,
 and backup-files directories, are revalidated across hooks, recovery, report,
 and cleanup operations.
 
+The installer likewise records the real device and inode of its newly created
+`install.lock` directory. It revalidates that exact lock before transaction and
+home mutations and across the final commit boundaries. A disappeared,
+symlinked, non-directory, or different-inode lock makes the apply fail safely;
+rollback still restores owned target data, and cleanup never removes the
+replacement occupying the lock name. Release first moves the lock name without
+clobbering to a private state-root path, verifies the moved device and inode,
+and removes only that verified directory; a moved foreign replacement is
+restored when safe or retained for recovery.
+
 The report is created without clobbering and retained by an open file handle for
 the whole transaction. Each backup set permanently retains a separately pinned
 `report-recovery.tsv` hardlink beside its public `report.tsv`: both names refer

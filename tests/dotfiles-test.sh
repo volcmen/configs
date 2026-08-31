@@ -3131,7 +3131,7 @@ STUB
 }
 
 test_install_production_ignores_path_and_test_primitive_overrides() {
-    local stub_bin status output report
+    local stub_bin hook status output report
     new_fixture
     mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo" "$TEST_TMP/stub-bin"
     printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
@@ -3158,13 +3158,20 @@ STUB
 : >"$TEST_TMP/override-mv-ran"
 exit 99
 STUB
-    chmod +x "$stub_bin/stat" "$stub_bin/mv" "$stub_bin/override-stat" "$stub_bin/override-mv"
+    hook="$TEST_TMP/production-ignored-install-hook"
+    cat >"$hook" <<STUB
+#!/bin/sh
+: >"$TEST_TMP/production-install-hook-ran"
+exit 99
+STUB
+    chmod +x "$stub_bin/stat" "$stub_bin/mv" "$stub_bin/override-stat" "$stub_bin/override-mv" "$hook"
 
     if output="$(HOME="$TEST_TMP/home" XDG_STATE_HOME="$TEST_TMP/state" \
         DOTFILES_TEST_TRANSACTION_KERNEL=Linux \
         DOTFILES_TEST_STAT_COMMAND="$stub_bin/override-stat" \
         DOTFILES_TEST_MOVE_COMMAND="$stub_bin/override-mv" \
         DOTFILES_TEST_REPORT_PARTIAL_TYPE=MOVE_FINAL \
+        DOTFILES_TEST_INSTALL_HOOK="$hook" \
         PATH="$stub_bin:/usr/bin:/bin" "$TEST_TMP/repo/bin/dotfiles" install --apply --backup 2>&1)"; then
         status=0
     else
@@ -3176,6 +3183,7 @@ STUB
     assert_not_exists "$TEST_TMP/path-mv-ran" || return 1
     assert_not_exists "$TEST_TMP/override-stat-ran" || return 1
     assert_not_exists "$TEST_TMP/override-mv-ran" || return 1
+    assert_not_exists "$TEST_TMP/production-install-hook-ran" || return 1
     report="$(find "$TEST_TMP/state" -name report.tsv -type f -print)"
     [[ -n "$report" ]] || return 1
     [[ "$(awk -F '\t' '$1 == "MOVE_INTENT" { count++ } END { print count + 0 }' "$report")" == 1 ]] || return 1
@@ -3297,6 +3305,293 @@ test_install_existing_lock_refuses_mutation() {
     run_cli install --apply
     assert_status 75 && assert_contains 'another install is active' || return 1
     assert_not_exists "$TEST_TMP/home/.config/demo/config"
+}
+
+test_install_concurrent_process_refuses_while_pinned_lock_is_held() {
+    local hook first_pid first_status='' i
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/hold-acquired-lock"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = after_lock_acquire ]; then
+    : >"$TEST_TMP/first-install-holds-lock"
+    attempt=0
+    while [ ! -e "$TEST_TMP/release-first-install" ] && [ "\$attempt" -lt 500 ]; do
+        /bin/sleep 0.02
+        attempt=\$((attempt + 1))
+    done
+    [ -e "$TEST_TMP/release-first-install" ] || exit 98
+fi
+STUB
+    chmod +x "$hook"
+
+    (
+        DOTFILES_TESTING=1 \
+            DOTFILES_TEST_HOME="$TEST_TMP/home" \
+            DOTFILES_TEST_STATE="$TEST_TMP/state" \
+            DOTFILES_TEST_UNAME=Darwin \
+            DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" \
+            DOTFILES_TEST_INSTALL_HOOK="$hook" \
+            "$TEST_TMP/repo/bin/dotfiles" install --apply \
+            >"$TEST_TMP/first-install-output" 2>&1
+        printf '%s\n' "$?" >"$TEST_TMP/first-install-status"
+    ) &
+    first_pid=$!
+
+    for ((i=0; i<300; i++)); do
+        [[ -e "$TEST_TMP/first-install-holds-lock" ]] && break
+        kill -0 "$first_pid" 2>/dev/null || break
+        /bin/sleep 0.02
+    done
+    if [[ ! -e "$TEST_TMP/first-install-holds-lock" ]]; then
+        : >"$TEST_TMP/release-first-install"
+        wait "$first_pid" 2>/dev/null || true
+        fail "first install did not hold the lock: $(<"$TEST_TMP/first-install-output")"
+        return 1
+    fi
+
+    run_cli install --apply
+    assert_status 75 && assert_contains 'another install is active' || {
+        : >"$TEST_TMP/release-first-install"
+        wait "$first_pid" 2>/dev/null || true
+        return 1
+    }
+    assert_not_exists "$TEST_TMP/home/.config/demo/config" || {
+        : >"$TEST_TMP/release-first-install"
+        wait "$first_pid" 2>/dev/null || true
+        return 1
+    }
+
+    : >"$TEST_TMP/release-first-install"
+    wait "$first_pid" || true
+    [[ -f "$TEST_TMP/first-install-status" ]] && first_status="$(<"$TEST_TMP/first-install-status")"
+    [[ "$first_status" == 0 ]] || fail "first install failed: $(<"$TEST_TMP/first-install-output")" || return 1
+    [[ -L "$TEST_TMP/home/.config/demo/config" ]] || return 1
+    [[ "$(readlink "$TEST_TMP/home/.config/demo/config")" == "$TEST_TMP/repo/home/.config/demo/config" ]] || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock"
+}
+
+test_install_replaced_empty_lock_fails_before_mutation_and_preserves_replacement() {
+    local hook replacement_identity
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/replace-acquired-lock"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = after_lock_acquire ]; then
+    /bin/mv "\$3/install.lock" "\$3/install.lock.acquired"
+    /bin/mkdir "\$3/install.lock"
+    /usr/bin/stat -f '%d:%i' "\$3/install.lock" >"$TEST_TMP/replacement-lock-identity"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
+    assert_status 74 && assert_contains 'install lock identity changed; replacement was not removed' || return 1
+    replacement_identity="$(<"$TEST_TMP/replacement-lock-identity")"
+    [[ -d "$TEST_TMP/state/install.lock" && ! -L "$TEST_TMP/state/install.lock" ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/state/install.lock")" == "$replacement_identity" ]] || return 1
+    [[ -d "$TEST_TMP/state/install.lock.acquired" && ! -L "$TEST_TMP/state/install.lock.acquired" ]] || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/config" || return 1
+    assert_not_exists "$TEST_TMP/state/transactions"
+}
+
+test_install_disappeared_lock_fails_before_mutation() {
+    local hook
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/remove-acquired-lock"
+    cat >"$hook" <<'STUB'
+#!/bin/sh
+if [ "$1" = after_lock_acquire ]; then
+    /bin/rmdir "$3/install.lock"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
+    assert_status 74 && assert_contains 'install lock disappeared before release' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/config" || return 1
+    assert_not_exists "$TEST_TMP/state/transactions" || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock"
+}
+
+test_install_symlinked_lock_fails_before_mutation_and_preserves_foreign_directory() {
+    local hook
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/foreign-lock"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'foreign\n' >"$TEST_TMP/foreign-lock/sentinel"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/symlink-acquired-lock"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = after_lock_acquire ]; then
+    /bin/rmdir "\$3/install.lock"
+    /bin/ln -s "$TEST_TMP/foreign-lock" "\$3/install.lock"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
+    assert_status 74 && assert_contains 'install lock became a symlink; replacement was not removed' || return 1
+    [[ -L "$TEST_TMP/state/install.lock" ]] || return 1
+    [[ "$(readlink "$TEST_TMP/state/install.lock")" == "$TEST_TMP/foreign-lock" ]] || return 1
+    [[ "$(<"$TEST_TMP/foreign-lock/sentinel")" == foreign ]] || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/config" || return 1
+    assert_not_exists "$TEST_TMP/state/transactions"
+}
+
+test_install_nondirectory_lock_fails_before_mutation_and_preserves_replacement() {
+    local hook
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/replace-lock-with-file"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = after_lock_acquire ]; then
+    /bin/rmdir "\$3/install.lock"
+    printf 'foreign-lock-file\n' >"\$3/install.lock"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
+    assert_status 74 && assert_contains 'install lock is no longer a directory; replacement was not removed' || return 1
+    [[ -f "$TEST_TMP/state/install.lock" && ! -L "$TEST_TMP/state/install.lock" ]] || return 1
+    [[ "$(<"$TEST_TMP/state/install.lock")" == foreign-lock-file ]] || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/config" || return 1
+    assert_not_exists "$TEST_TMP/state/transactions"
+}
+
+test_install_lock_replacement_at_last_precommit_rolls_back_backup_and_preserves_replacement() {
+    local hook replacement_identity backup
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/replace-lock-at-last-precommit"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = last_precommit ]; then
+    /bin/mv "$TEST_TMP/state/install.lock" "$TEST_TMP/state/install.lock.acquired"
+    /bin/mkdir "$TEST_TMP/state/install.lock"
+    /usr/bin/stat -f '%d:%i' "$TEST_TMP/state/install.lock" >"$TEST_TMP/precommit-replacement-lock-identity"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    assert_status 74 && assert_contains 'install lock identity changed; replacement was not removed' || return 1
+    replacement_identity="$(<"$TEST_TMP/precommit-replacement-lock-identity")"
+    [[ -f "$TEST_TMP/home/.config/demo/config" && ! -L "$TEST_TMP/home/.config/demo/config" ]] || return 1
+    [[ "$(<"$TEST_TMP/home/.config/demo/config")" == existing ]] || return 1
+    [[ -d "$TEST_TMP/state/install.lock" && ! -L "$TEST_TMP/state/install.lock" ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/state/install.lock")" == "$replacement_identity" ]] || return 1
+    backup="$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config' -type f -print)"
+    [[ -z "$backup" ]] || fail "rollback left the restored backup published at $backup" || return 1
+}
+
+test_install_report_append_lock_replacement_fails_before_write() {
+    local hook replacement_identity report
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/replace-lock-before-report-write"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = report_after_handle_check ] && [ "\$2" = MOVE_INTENT ] && [ ! -e "$TEST_TMP/report-lock-replaced" ]; then
+    : >"$TEST_TMP/report-lock-replaced"
+    /bin/mv "$TEST_TMP/state/install.lock" "$TEST_TMP/state/install.lock.acquired"
+    /bin/mkdir "$TEST_TMP/state/install.lock"
+    /usr/bin/stat -f '%d:%i' "$TEST_TMP/state/install.lock" >"$TEST_TMP/report-replacement-lock-identity"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    assert_status 74 && assert_contains 'install lock identity changed; replacement was not removed' || return 1
+    replacement_identity="$(<"$TEST_TMP/report-replacement-lock-identity")"
+    [[ -f "$TEST_TMP/home/.config/demo/config" && ! -L "$TEST_TMP/home/.config/demo/config" ]] || return 1
+    [[ "$(<"$TEST_TMP/home/.config/demo/config")" == existing ]] || return 1
+    [[ -d "$TEST_TMP/state/install.lock" && ! -L "$TEST_TMP/state/install.lock" ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/state/install.lock")" == "$replacement_identity" ]] || return 1
+    report="$(find "$TEST_TMP/state/backups" -name report.tsv -type f -print)"
+    [[ -n "$report" ]] || return 1
+    ! LC_ALL=C grep '^MOVE_INTENT' "$report"
+}
+
+test_install_release_race_preserves_replacement_lock() {
+    local hook replacement_identity
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/replace-lock-before-release-move"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = release_lock_before_move ]; then
+    /bin/mv "\$2" "\$2.acquired"
+    /bin/mkdir "\$2"
+    /usr/bin/stat -f '%d:%i' "\$2" >"$TEST_TMP/release-replacement-lock-identity"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
+    assert_status 74 && assert_contains 'install lock identity changed during release' || return 1
+    replacement_identity="$(<"$TEST_TMP/release-replacement-lock-identity")"
+    [[ -L "$TEST_TMP/home/.config/demo/config" ]] || return 1
+    [[ "$(readlink "$TEST_TMP/home/.config/demo/config")" == "$TEST_TMP/repo/home/.config/demo/config" ]] || return 1
+    [[ -d "$TEST_TMP/state/install.lock" && ! -L "$TEST_TMP/state/install.lock" ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/state/install.lock")" == "$replacement_identity" ]] || return 1
+    [[ -d "$TEST_TMP/state/install.lock.acquired" && ! -L "$TEST_TMP/state/install.lock.acquired" ]] || return 1
+    [[ -z "$(find "$TEST_TMP/state" -maxdepth 1 -name '.install.lock.release-*' -print)" ]]
+}
+
+test_install_bsd_release_destination_directory_arrival_preserves_all_locks() {
+    local hook release_path acquired_identity release_identity
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/occupy-private-release-path"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = release_lock_before_move ]; then
+    printf '%s\n' "\$3" >"$TEST_TMP/private-release-path"
+    /usr/bin/stat -f '%d:%i' "\$2" >"$TEST_TMP/release-acquired-lock-identity"
+    /bin/mkdir "\$3"
+    printf 'foreign-release-directory\n' >"\$3/sentinel"
+    /usr/bin/stat -f '%d:%i' "\$3" >"$TEST_TMP/private-release-directory-identity"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
+    assert_status 74 && assert_contains 'acquired install lock was retained without removal at' || return 1
+    release_path="$(<"$TEST_TMP/private-release-path")"
+    acquired_identity="$(<"$TEST_TMP/release-acquired-lock-identity")"
+    release_identity="$(<"$TEST_TMP/private-release-directory-identity")"
+    [[ -L "$TEST_TMP/home/.config/demo/config" ]] || return 1
+    assert_not_exists "$TEST_TMP/state/install.lock" || return 1
+    [[ -d "$release_path" && ! -L "$release_path" ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$release_path")" == "$release_identity" ]] || return 1
+    [[ "$(<"$release_path/sentinel")" == foreign-release-directory ]] || return 1
+    [[ -d "$release_path/install.lock" && ! -L "$release_path/install.lock" ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$release_path/install.lock")" == "$acquired_identity" ]]
 }
 
 test_install_releases_lock_after_success_and_failure() {
@@ -4578,6 +4873,15 @@ run_test test_install_test_mode_exercises_bsd_and_gnu_primitive_arguments
 run_test test_install_rejects_malformed_and_multiline_path_identities
 run_test test_install_gnu_stat_selector_avoids_literal_format_operand_collision
 run_test test_install_existing_lock_refuses_mutation
+run_test test_install_concurrent_process_refuses_while_pinned_lock_is_held
+run_test test_install_replaced_empty_lock_fails_before_mutation_and_preserves_replacement
+run_test test_install_disappeared_lock_fails_before_mutation
+run_test test_install_symlinked_lock_fails_before_mutation_and_preserves_foreign_directory
+run_test test_install_nondirectory_lock_fails_before_mutation_and_preserves_replacement
+run_test test_install_lock_replacement_at_last_precommit_rolls_back_backup_and_preserves_replacement
+run_test test_install_report_append_lock_replacement_fails_before_write
+run_test test_install_release_race_preserves_replacement_lock
+run_test test_install_bsd_release_destination_directory_arrival_preserves_all_locks
 run_test test_install_releases_lock_after_success_and_failure
 run_test test_install_backup_report_records_move_and_link_rows
 run_test test_install_injected_failure_rolls_back_partial_work

@@ -275,7 +275,15 @@ Installation rules:
     Carry and revalidate those physical identities, plus the unique
     transaction, backup, quarantine, and backup-files identities, through
     hooks, recovery, reporting, and ownership-aware cleanup.
-12. Never run package installation, service, session, login-shell, or reload
+12. Capture the real device and inode of the physically contained
+    `install.lock` directory immediately after acquiring it. Revalidate that
+    identity before transaction and home mutations and at terminal commit
+    boundaries; if the name disappears or is replaced, fail and roll back
+    without removing the replacement. Release must first move the logical lock
+    without clobbering to a private state-root path and remove it only after the
+    moved device and inode match the acquired lock; restore or retain any moved
+    foreign replacement.
+13. Never run package installation, service, session, login-shell, or reload
     commands.
 
 Install preflight uses only the candidate-file validator registry. A validator
