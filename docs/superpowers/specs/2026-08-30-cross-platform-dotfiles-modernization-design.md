@@ -306,7 +306,8 @@ Initial validator groups:
 - TOML parsing through the application binary where possible;
 - Lua syntax checking plus a separate Hyprland-runtime-unverified result;
 - JSONC, XML, INI, and Fontconfig checks;
-- Fuzzel’s native `--check-config` on Arch;
+- Fuzzel’s fixed, allowlisted `fuzzel` validator, invoking exactly
+  `fuzzel --check-config --config="$file"` against the canonical candidate;
 - live Hyprland configuration errors only on an actual Hyprland session.
 
 No generic Lua parser can validate Hyprland API names, dispatcher signatures,
@@ -367,7 +368,8 @@ Current high-priority reviews include:
 - validating the existing Hyprland Lua API calls against the real Arch version;
 - making Fish 4.3+ theme/binding ownership explicit if generated migration files
   exist on a target host;
-- adding Fuzzel’s native config check;
+- routing Fuzzel’s manifest row to its native candidate-file check while
+  preserving status 125 as nonblocking `RUNTIME UNVERIFIED`;
 - auditing any dependency on Mako’s deprecated implicit `default` mode;
 - reconciling tracked/live Kitty and Zellij differences;
 - documenting the Yazi plugin version and update process.

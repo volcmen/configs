@@ -509,6 +509,124 @@ test_check_never_executes_manifest_validator_text() {
         assert_not_exists "$TEST_TMP/manifest-executed"
 }
 
+test_fuzzel_manifest_routes_exact_native_candidate_argv() {
+    local original_tmp spaced_tmp validator_bin expected_argv actual_argv
+    new_fixture
+    original_tmp=$TEST_TMP
+    spaced_tmp="$TEST_TMP with spaces"
+    mv "$original_tmp" "$spaced_tmp" || return 1
+    TEST_TMP=$spaced_tmp
+    validator_bin="$TEST_TMP/validator-bin"
+    mkdir -p "$validator_bin" "$TEST_TMP/repo/home/.config/fuzzel"
+    cp "$PROJECT_ROOT/home/.config/fuzzel/fuzzel.ini" "$TEST_TMP/repo/home/.config/fuzzel/fuzzel.ini"
+    /usr/bin/awk -F'|' '$1 == "fuzzel" { print }' "$PROJECT_ROOT/dotfiles.manifest" >"$TEST_TMP/repo/dotfiles.manifest"
+    write_os_release 'ID=arch'
+    cat >"$validator_bin/fuzzel" <<STUB
+#!/bin/sh
+if [ "\${1:-}" = --version ]; then
+    printf 'fuzzel version 1.11.1\n'
+    exit 0
+fi
+: >"$TEST_TMP/fuzzel-argv"
+for argument do
+    printf '<%s>\n' "\$argument" >>"$TEST_TMP/fuzzel-argv"
+done
+exit 0
+STUB
+    chmod +x "$validator_bin/fuzzel"
+
+    DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" \
+        DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" run_cli check --target arch
+    assert_status 0 && \
+        assert_contains 'PASS fuzzel .config/fuzzel/fuzzel.ini: syntax validated' || return 1
+    expected_argv=$(printf '<--check-config>\n<--config=%s>\n' "$TEST_TMP/repo/home/.config/fuzzel/fuzzel.ini")
+    actual_argv=$(<"$TEST_TMP/fuzzel-argv")
+    [[ "$actual_argv" == "$expected_argv" ]] || fail "Fuzzel argv mismatch: $actual_argv"
+}
+
+test_fuzzel_missing_binary_is_visible_and_nonblocking() {
+    local empty_bin
+    new_fixture
+    empty_bin="$TEST_TMP/empty-bin"
+    mkdir -p "$empty_bin" "$TEST_TMP/repo/home/.config/fuzzel"
+    printf '[main]\nfont=monospace\n' >"$TEST_TMP/repo/home/.config/fuzzel/fuzzel.ini"
+    write_manifest 'fuzzel|arch|file|.config/fuzzel/fuzzel.ini|fuzzel|yes|unverified'
+    write_os_release 'ID=arch'
+
+    DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" \
+        DOTFILES_TEST_PATH="$empty_bin:/usr/bin:/bin" run_cli check --target arch
+    assert_status 0 && \
+        assert_contains 'RUNTIME UNVERIFIED fuzzel .config/fuzzel/fuzzel.ini: validator unavailable or intentionally unsafe on arch' || return 1
+
+    DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" \
+        DOTFILES_TEST_PATH="$empty_bin:/usr/bin:/bin" run_cli install
+    assert_status 0 && \
+        assert_contains 'CREATE fuzzel .config/fuzzel/fuzzel.ini' && \
+        assert_contains 'RUNTIME UNVERIFIED fuzzel .config/fuzzel/fuzzel.ini: validator unavailable or intentionally unsafe on arch' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/fuzzel/fuzzel.ini" || return 1
+    assert_not_exists "$TEST_TMP/state" || return 1
+
+    DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" \
+        DOTFILES_TEST_PATH="$empty_bin:/usr/bin:/bin" run_cli install --apply
+    assert_status 0 && \
+        assert_contains 'RUNTIME UNVERIFIED fuzzel .config/fuzzel/fuzzel.ini: validator unavailable or intentionally unsafe on arch' || return 1
+    [[ "$(readlink "$TEST_TMP/home/.config/fuzzel/fuzzel.ini")" == "$TEST_TMP/repo/home/.config/fuzzel/fuzzel.ini" ]]
+}
+
+test_fuzzel_failure_blocks_check_and_install_before_any_mutation() {
+    local validator_bin install_hook
+    new_fixture
+    validator_bin="$TEST_TMP/validator-bin"
+    install_hook="$TEST_TMP/install-hook"
+    mkdir -p "$validator_bin" "$TEST_TMP/repo/home/.config/fuzzel"
+    printf '[main\nmalformed=true\n' >"$TEST_TMP/repo/home/.config/fuzzel/fuzzel.ini"
+    write_manifest 'fuzzel|arch|file|.config/fuzzel/fuzzel.ini|fuzzel|yes|unverified'
+    write_os_release 'ID=arch'
+    cat >"$validator_bin/fuzzel" <<STUB
+#!/bin/sh
+if [ "\${1:-}" = --version ]; then
+    printf 'fuzzel version 1.11.1\n'
+    exit 0
+fi
+printf '%s\n' "\$*" >>"$TEST_TMP/fuzzel-check-calls"
+printf 'candidate rejected\n' >&2
+exit 9
+STUB
+    cat >"$install_hook" <<STUB
+#!/bin/sh
+: >"$TEST_TMP/outside-mutated"
+STUB
+    chmod +x "$validator_bin/fuzzel" "$install_hook"
+
+    DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" \
+        DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" DOTFILES_TEST_INSTALL_HOOK="$install_hook" \
+        run_cli check --target arch
+    assert_status 1 && \
+        assert_contains 'BLOCKED fuzzel .config/fuzzel/fuzzel.ini: candidate rejected' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/fuzzel/fuzzel.ini" || return 1
+    assert_not_exists "$TEST_TMP/state" || return 1
+    assert_not_exists "$TEST_TMP/outside-mutated" || return 1
+
+    DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" \
+        DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" DOTFILES_TEST_INSTALL_HOOK="$install_hook" \
+        run_cli install
+    assert_status 65 && \
+        assert_contains 'BLOCKED fuzzel .config/fuzzel/fuzzel.ini: candidate rejected' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/fuzzel/fuzzel.ini" || return 1
+    assert_not_exists "$TEST_TMP/state" || return 1
+    assert_not_exists "$TEST_TMP/outside-mutated" || return 1
+
+    DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" \
+        DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" DOTFILES_TEST_INSTALL_HOOK="$install_hook" \
+        run_cli install --apply
+    assert_status 65 && \
+        assert_contains 'BLOCKED fuzzel .config/fuzzel/fuzzel.ini: candidate rejected' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/fuzzel/fuzzel.ini" || return 1
+    assert_not_exists "$TEST_TMP/state" || return 1
+    assert_not_exists "$TEST_TMP/outside-mutated" || return 1
+    [[ "$(wc -l <"$TEST_TMP/fuzzel-check-calls")" -eq 3 ]]
+}
+
 test_check_missing_source_uses_required_semantics() {
     new_fixture
     write_manifest 'optional|macos|file|.config/demo/optional|plain|no|1'
@@ -4119,6 +4237,9 @@ run_test test_check_blocks_newline_only_hyprland_runtime_output
 run_test test_check_blocks_nul_only_hyprland_runtime_output
 run_test test_check_sanitizes_validator_control_diagnostics
 run_test test_check_never_executes_manifest_validator_text
+run_test test_fuzzel_manifest_routes_exact_native_candidate_argv
+run_test test_fuzzel_missing_binary_is_visible_and_nonblocking
+run_test test_fuzzel_failure_blocks_check_and_install_before_any_mutation
 run_test test_check_missing_source_uses_required_semantics
 run_test test_check_reports_reviewed_and_safe_installed_versions
 run_test test_check_version_observation_is_not_applicable_off_platform

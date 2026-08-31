@@ -60,7 +60,7 @@ for source review; it must not be read as the installed Arch version.
 | Fontconfig | macOS, Arch | 2.18.3 | active XML `PASS` on macOS | `unverified` |
 | Chromium | Arch | `unverified` | flags source `STATIC PASS` | `unverified` |
 | Electron applications | Arch | `unverified` | shared flags source `STATIC PASS`; no single Electron binary was inventoried | `unverified` |
-| Fuzzel | Arch | `unverified` | native check `RUNTIME UNVERIFIED` | `unverified` |
+| Fuzzel | Arch | `unverified` | allowlisted native candidate check; `RUNTIME UNVERIFIED` because Fuzzel is absent on this macOS host | `unverified` |
 | Hyprland (`hyprctl`) | Arch | 0.56.2 | Lua `STATIC PASS`; session `RUNTIME UNVERIFIED` | `unverified` |
 | hypridle | Arch | 0.1.7 | native/runtime check `RUNTIME UNVERIFIED` | `unverified` |
 | hyprlock | Arch | `unverified` | native/runtime check `RUNTIME UNVERIFIED` | `unverified` |
@@ -86,6 +86,7 @@ remain excluded.
 | Required | Four tracked Kitty/Zellij files differed from the live macOS files. | Reconciled deliberately in `fdc7cd1`; exact paths and changes are recorded below. |
 | Required | Shared clipboard commands were platform-specific. | Zellij now calls `dotfiles-copy`; Yazi uses its native Linux/macOS selectors. Automated tests cover both dispatch paths. |
 | Required | Hyprland Lua-era animation/dispatcher syntax and UWSM logout needed the reviewed forms. | Animation selectors use `bezier` for the existing Bézier names and `spring` for the existing `easy` spring; DPMS/workspace commands use the Lua dispatchers; logout uses `uwsm stop`. The selector correction is grounded in the [Hyprland 0.56.2 Lua binding](https://github.com/hyprwm/Hyprland/blob/v0.56.2/src/config/lua/bindings/LuaBindingsConfigRules.cpp#L428-L453) and [0.56.2 example](https://github.com/hyprwm/Hyprland/blob/v0.56.2/example/hyprland.lua#L134-L150). No reload was run. See also the [Hyprland animation guide](https://wiki.hypr.land/configuring/core/animations/) and [start guide](https://wiki.hypr.land/Configuring/Start/). |
+| Required | Fuzzel's native candidate validator was unreachable through the generic `ini` manifest row. | The manifest now selects the fixed, allowlisted `fuzzel` validator, which invokes exactly `fuzzel --check-config --config="$file"`. Missing Fuzzel returns status 125 and stays visibly nonblocking; any other nonzero result blocks check and install preflight before mutation. Stubbed argv and mutation-boundary tests pass; real Arch execution remains unverified. |
 | Recommended | Optional Fish tools and the Homebrew path needed explicit availability guards. | Guards were added in `e651449` without changing successful initialization order. |
 | Recommended | The inactive Fontconfig alternative obscured canonical ownership. | Decision and exact evidence are recorded in the Fontconfig section below. |
 | Optional | Theme, fonts, spacing, layouts, animations, bindings, and startup workflow redesigns. | Excluded. Existing user-visible values and behavior-sensitive files were preserved. |
@@ -93,8 +94,9 @@ remain excluded.
 
 Official configuration references used for Arch handoff are the
 [Fuzzel manual](https://man.archlinux.org/man/fuzzel.1.en) and
-[Mako configuration manual](https://man.archlinux.org/man/mako.5). Their native
-checks remain `RUNTIME UNVERIFIED` until they run on Arch.
+[Mako configuration manual](https://man.archlinux.org/man/mako.5). Fuzzel now
+has an allowlisted native candidate-file check; its real result, along with
+Mako's native check, remains `RUNTIME UNVERIFIED` until it runs on Arch.
 
 ## Exact live-drift reconciliation
 
@@ -146,9 +148,10 @@ Hyprland runtime behavior.
 
 The macOS Arch-target check returned success while honestly separating static
 and runtime evidence. Lua, shell, JSONC, and XML checks produced `STATIC PASS`
-where tools were available. Hyprland session validation, Fuzzel, Mako,
-hypridle, hyprlock, hyprpaper, hyprsunset, and other native/session-sensitive
-checks remain `RUNTIME UNVERIFIED`.
+where tools were available. The Fuzzel candidate check was selected but
+returned `RUNTIME UNVERIFIED` because the binary is absent on this macOS host.
+Hyprland session validation, Mako, hypridle, hyprlock, hyprpaper, hyprsunset,
+and other native/session-sensitive checks likewise remain runtime-unverified.
 
 On an active Arch session, `hyprctl configerrors` is captured once and reported
 as a separate `hyprland live-session` result. A clean result does not establish

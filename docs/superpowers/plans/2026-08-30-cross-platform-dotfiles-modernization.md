@@ -412,7 +412,7 @@ valid_platforms() {
 
 valid_validator() {
     case "$1" in
-        plain|shell|fish|fontconfig|git|hyprconf|hyprland-lua|ini|jsonc|kitty|lua|mako|mpv|python|starship|toml|uwsm-shell|xml|zellij|css) return 0 ;;
+        plain|shell|fish|fontconfig|fuzzel|git|hyprconf|hyprland-lua|ini|jsonc|kitty|lua|mako|mpv|python|starship|toml|uwsm-shell|xml|zellij|css) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -486,7 +486,7 @@ yazi|macos,arch|file|.config/yazi/plugins/m-recycle-bin.yazi/main.lua|lua|yes|26
 zellij|macos,arch|file|.config/zellij/config.kdl|zellij|yes|0.45.1
 chromium|arch|file|.config/chromium-flags.conf|plain|yes|unverified
 electron|arch|file|.config/electron-flags.conf|plain|yes|unverified
-fuzzel|arch|file|.config/fuzzel/fuzzel.ini|ini|yes|unverified
+fuzzel|arch|file|.config/fuzzel/fuzzel.ini|fuzzel|yes|unverified
 hypridle|arch|file|.config/hypr/hypridle.conf|hyprconf|yes|0.1.7
 hyprland|arch|file|.config/hypr/hyprland.lua|hyprland-lua|yes|0.56.2
 hyprland|arch|file|.config/hypr/hyprland/execs.lua|hyprland-lua|yes|0.56.2
@@ -978,6 +978,10 @@ Add fixture tests proving:
   parser exists;
 - a valid file passes;
 - a missing native binary yields `RUNTIME UNVERIFIED` rather than `PASS`;
+- Fuzzel uses the real manifest row and exact argument vector
+  `--check-config --config=PATH`;
+- a nonzero Fuzzel candidate check blocks `check`, install preview, and install
+  apply before home, state, or outside mutation;
 - an Arch Hyprland Lua file checked on macOS yields `STATIC PASS` followed by
   `RUNTIME UNVERIFIED`;
 - validator IDs cannot execute manifest text.
@@ -1003,6 +1007,10 @@ run_validator() {
         plain) return 0 ;;
         shell) bash -n "$file" ;;
         fish) command -v fish >/dev/null 2>&1 || return 125; fish -n "$file" ;;
+        fuzzel)
+            command -v fuzzel >/dev/null 2>&1 || return 125
+            fuzzel --check-config --config="$file"
+            ;;
         git) command -v git >/dev/null 2>&1 || return 125; git config --file "$file" --list >/dev/null ;;
         lua|hyprland-lua) command -v luac >/dev/null 2>&1 || return 125; luac -p "$file" ;;
         python)

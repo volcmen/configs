@@ -108,6 +108,13 @@ validator failure blocks preview and apply; status 125 is printed as
 `RUNTIME UNVERIFIED` and remains nonblocking. Install never runs live-session
 or runtime probes.
 
+Fuzzel's manifest row selects the fixed, allowlisted `fuzzel` validator. When
+the binary is available, `check` and install preflight invoke exactly
+`fuzzel --check-config --config="$file"` against the canonical candidate. A
+missing Fuzzel binary follows the nonblocking status-125 rule above; any other
+nonzero result blocks before installation mutation. Manifest values remain
+data and cannot supply command text.
+
 Apply only after reviewing the plan:
 
 ```bash
@@ -267,6 +274,10 @@ Waybar, Fuzzel, Mako, and UWSM versions. Resolve only observed failures, rerun
 the checks, and manually verify bindings, layout, theme, rules, startup,
 idle/lock/DPMS, launcher, notifications, portal, terminal, and clipboard
 behavior. Keep every unobserved item `RUNTIME UNVERIFIED`.
+
+The manager's Fuzzel result is candidate-file evidence only. This macOS review
+could not run the Fuzzel binary or a real Arch desktop session, so the actual
+Arch result remains `RUNTIME UNVERIFIED` until the gate above runs there.
 
 `hyprctl configerrors` checks the one running Hyprland session. The manager
 reports that probe once as `hyprland live-session`; even a clean probe does not

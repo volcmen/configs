@@ -93,7 +93,7 @@ valid_platforms() {
 
 valid_validator() {
     case "$1" in
-        plain|shell|fish|fontconfig|git|hyprconf|hyprland-lua|ini|jsonc|kitty|lua|mako|mpv|python|starship|toml|uwsm-shell|xml|zellij|css) return 0 ;;
+        plain|shell|fish|fontconfig|fuzzel|git|hyprconf|hyprland-lua|ini|jsonc|kitty|lua|mako|mpv|python|starship|toml|uwsm-shell|xml|zellij|css) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -388,6 +388,10 @@ run_validator() {
         plain) return 0 ;;
         shell) bash -n "$file" ;;
         fish) command -v fish >/dev/null 2>&1 || return 125; fish -n "$file" ;;
+        fuzzel)
+            command -v fuzzel >/dev/null 2>&1 || return 125
+            fuzzel --check-config --config="$file"
+            ;;
         git) command -v git >/dev/null 2>&1 || return 125; git config --file "$file" --list >/dev/null ;;
         lua|hyprland-lua) command -v luac >/dev/null 2>&1 || return 125; luac -p "$file" ;;
         python)
