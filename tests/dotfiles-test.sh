@@ -962,6 +962,90 @@ test_install_backup_blocks_directory_conflict() {
     assert_not_exists "$TEST_TMP/state/install.lock"
 }
 
+test_install_cross_device_backup_is_rejected_before_home_or_backup_mutation() {
+    local stub original_identity
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo" "$TEST_TMP/stub-bin"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    original_identity="$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/demo/config")"
+    stub="$TEST_TMP/stub-bin/stat"
+    cat >"$stub" <<STUB
+#!/bin/sh
+[ "\$1" = -f ] && [ "\$2" = %d:%i ] || exit 91
+shift 2
+identity=\$(/usr/bin/stat -f '%d:%i' "\$1") || exit
+if [ "\$1" = . ]; then
+    physical=\$(/bin/pwd -P) || exit
+elif [ -d "\$1" ]; then
+    physical=\$(cd -P -- "\$1" && /bin/pwd -P) || exit
+else
+    physical=''
+fi
+if [ "\$physical" = "$TEST_TMP/home/.config/demo" ]; then
+    printf '999999:%s\n' "\${identity#*:}"
+else
+    printf '%s\n' "\$identity"
+fi
+STUB
+    chmod +x "$stub"
+
+    DOTFILES_TEST_TRANSACTION_KERNEL=Darwin DOTFILES_TEST_STAT_COMMAND="$stub" \
+        run_cli install --apply --backup
+    assert_status 74 && assert_contains 'backup target parent is on a different device than the pinned state root' || return 1
+    [[ -f "$TEST_TMP/home/.config/demo/config" && ! -L "$TEST_TMP/home/.config/demo/config" ]] || return 1
+    [[ "$(<"$TEST_TMP/home/.config/demo/config")" == existing ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/demo/config")" == "$original_identity" ]] || return 1
+    assert_not_exists "$TEST_TMP/state/backups"
+}
+
+test_install_rejects_symlinked_transactions_container_without_escape() {
+    local hook
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/state" "$TEST_TMP/outside-transactions"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    ln -s "$TEST_TMP/outside-transactions" "$TEST_TMP/state/transactions"
+    hook="$TEST_TMP/observe-transactions-escape"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = before_prepare_parent ] && find "$TEST_TMP/outside-transactions" -mindepth 1 -print -quit | grep -q .; then
+    : >"$TEST_TMP/transactions-escape-observed"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'symlinked transactions container was accepted' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/config" || return 1
+    assert_not_exists "$TEST_TMP/transactions-escape-observed" || return 1
+    [[ -L "$TEST_TMP/state/transactions" ]] || return 1
+    [[ "$(readlink "$TEST_TMP/state/transactions")" == "$TEST_TMP/outside-transactions" ]] || return 1
+    [[ -z "$(find "$TEST_TMP/outside-transactions" -mindepth 1 -print)" ]]
+}
+
+test_install_rejects_symlinked_backups_container_without_escape() {
+    local original_identity
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo" \
+        "$TEST_TMP/state" "$TEST_TMP/outside-backups"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'existing\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    original_identity="$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/demo/config")"
+    ln -s "$TEST_TMP/outside-backups" "$TEST_TMP/state/backups"
+
+    run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'symlinked backups container was accepted' || return 1
+    [[ -f "$TEST_TMP/home/.config/demo/config" && ! -L "$TEST_TMP/home/.config/demo/config" ]] || return 1
+    [[ "$(<"$TEST_TMP/home/.config/demo/config")" == existing ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/demo/config")" == "$original_identity" ]] || return 1
+    [[ -L "$TEST_TMP/state/backups" ]] || return 1
+    [[ "$(readlink "$TEST_TMP/state/backups")" == "$TEST_TMP/outside-backups" ]] || return 1
+    [[ -z "$(find "$TEST_TMP/outside-backups" -mindepth 1 -print)" ]]
+}
+
 test_install_root_swap_back_cannot_false_succeed() {
     local hook planned_sentinel foreign_sentinel
     new_fixture
@@ -3794,6 +3878,9 @@ run_test test_install_rejects_backup_without_apply_and_unknown_options
 run_test test_install_backup_preserves_regular_file_relative_path
 run_test test_install_backup_preserves_foreign_symlink
 run_test test_install_backup_blocks_directory_conflict
+run_test test_install_cross_device_backup_is_rejected_before_home_or_backup_mutation
+run_test test_install_rejects_symlinked_transactions_container_without_escape
+run_test test_install_rejects_symlinked_backups_container_without_escape
 run_test test_install_root_swap_back_cannot_false_succeed
 run_test test_install_nested_ancestor_swap_back_cannot_false_succeed
 run_test test_install_final_verification_rejects_changed_noop_without_deleting_arrival

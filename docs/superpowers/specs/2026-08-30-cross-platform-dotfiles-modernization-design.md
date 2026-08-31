@@ -259,7 +259,11 @@ Installation rules:
    cloned at any location.
 8. Never replace regular files or foreign symlinks without `--backup`.
 9. Never move a directory/type conflict automatically, even with `--backup`.
-10. Never run package installation, service, session, login-shell, or reload
+10. Reject backup plans whose existing target parents are on a different
+    filesystem from the pinned state root; never copy as a fallback.
+11. Accept the state root's `transactions` and `backups` children only as real,
+    physically contained, identity-pinned directories, never as symlinks.
+12. Never run package installation, service, session, login-shell, or reload
     commands.
 
 Install preflight uses only the candidate-file validator registry. A validator

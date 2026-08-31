@@ -28,6 +28,10 @@ STATE_ROOT=''; STATE_ROOT_PHYSICAL=''; STATE_ROOT_IDENTITY=''; TRANSACTION_START
 INSTALL_ROOT_PHYSICAL=''; INSTALL_ROOT_IDENTITY=''
 PINNED_INSTALL_PATH=(); PINNED_INSTALL_PHYSICAL=(); PINNED_INSTALL_IDENTITY=(); PINNED_INSTALL_COUNT=0
 LOCK_PATH='install.lock'; LOCK_HELD=0
+TRANSACTIONS_ROOT_PHYSICAL=''; TRANSACTIONS_ROOT_IDENTITY=''
+BACKUPS_ROOT_PHYSICAL=''; BACKUPS_ROOT_IDENTITY=''
+TRANSACTION_ROOT_PHYSICAL=''; TRANSACTION_ROOT_IDENTITY=''
+BACKUP_ROOT_PHYSICAL=''; BACKUP_ROOT_IDENTITY=''
 TRANSACTION_ROOT=''; QUARANTINE_ROOT=''; BACKUP_ROOT=''; BACKUP_FILES=''; REPORT_PATH=''
 REPORT_IDENTITY=''; REPORT_RECOVERY_PATH=''; REPORT_RECOVERY_IDENTITY=''
 REPORT_RECOVERY_PARENT_PHYSICAL=''; REPORT_RECOVERY_PARENT_IDENTITY=''
@@ -904,6 +908,10 @@ reset_transaction_journal() {
     REPORT_RECOVERY_PARENT_PHYSICAL=''; REPORT_RECOVERY_PARENT_IDENTITY=''
     REPORT_FD_OPEN=0; REPORT_WRITE_FAILED=0
     REPORT_EXPECTED_ROW=(); REPORT_EXPECTED_COUNT=0
+    TRANSACTIONS_ROOT_PHYSICAL=''; TRANSACTIONS_ROOT_IDENTITY=''
+    BACKUPS_ROOT_PHYSICAL=''; BACKUPS_ROOT_IDENTITY=''
+    TRANSACTION_ROOT_PHYSICAL=''; TRANSACTION_ROOT_IDENTITY=''
+    BACKUP_ROOT_PHYSICAL=''; BACKUP_ROOT_IDENTITY=''
     MOVE_RESULT_NOOP=0; MOVE_RESULT_AMBIGUOUS=0
     TEST_FAIL_AFTER=''
     if [[ ${DOTFILES_TESTING:-0} == 1 ]]; then
@@ -1205,6 +1213,93 @@ state_physical_matches_pin() {
     [[ "$identity" == "$STATE_ROOT_IDENTITY" ]]
 }
 
+state_container_name_matches_pin() {
+    local name=$1 expected_physical=$2 expected_identity=$3 identity physical
+    state_cwd_matches_pin || return 1
+    [[ -d "$name" && ! -L "$name" ]] || return 1
+    identity=$(path_identity "$name") || return 1
+    [[ "$identity" == "$expected_identity" ]] || return 1
+    physical=$(physical_dir "$name") || return 1
+    [[ "$physical" == "$expected_physical" ]]
+}
+
+pin_state_container() {
+    local name=$1 pin identity physical
+    state_cwd_matches_pin && state_name_matches_pin || return 74
+    if [[ ! -e "$name" && ! -L "$name" ]]; then
+        run_without_report_fd mkdir -- "$name" || return 74
+    fi
+    if [[ ! -d "$name" || -L "$name" ]]; then
+        printf '%s: state container is not a real directory: %s\n' "$PROGRAM" "$name" >&2
+        return 74
+    fi
+    pin=$(capture_directory_pin "$name") || return 74
+    IFS=$'\t' read -r identity physical <<<"$pin"
+    [[ -n "$identity" && "$physical" == "$STATE_ROOT_PHYSICAL/$name" ]] || return 74
+    state_container_name_matches_pin "$name" "$physical" "$identity" || return 74
+    printf '%s\t%s\n' "$identity" "$physical"
+}
+
+create_pinned_state_storage() (
+    local container_physical=$1 container_identity=$2 child=$3 nested=$4 mode=$5
+    local current_identity current_physical child_identity child_physical
+    [[ -n "$container_physical" && -n "$container_identity" && -n "$child" ]] || return 74
+    case "$child" in */*|.|..) return 74 ;; esac
+    case "$nested" in */*|.|..) return 74 ;; esac
+    cd -P -- "$container_physical" || return 74
+    current_identity=$(path_identity .) || return 74
+    current_physical=$(run_without_report_fd /bin/pwd -P) || return 74
+    [[ "$current_identity" == "$container_identity" && "$current_physical" == "$container_physical" ]] || return 74
+    [[ ! -e "$child" && ! -L "$child" ]] || return 74
+    run_without_report_fd mkdir -- "$child" || return 74
+    [[ -z "$mode" ]] || run_without_report_fd chmod "$mode" "$child" || return 74
+    cd -P -- "$child" || return 74
+    child_identity=$(path_identity .) || return 74
+    child_physical=$(run_without_report_fd /bin/pwd -P) || return 74
+    [[ "$child_physical" == "$container_physical/$child" ]] || return 74
+    if [[ -n "$nested" ]]; then
+        [[ ! -e "$nested" && ! -L "$nested" ]] || return 74
+        run_without_report_fd mkdir -- "$nested" || return 74
+        [[ -d "$nested" && ! -L "$nested" ]] || return 74
+    fi
+    printf '%s\t%s\n' "$child_identity" "$child_physical"
+)
+
+state_storage_name_matches_pin() {
+    local container_name=$1 container_physical=$2 container_identity=$3
+    local storage_name=$4 storage_physical=$5 storage_identity=$6 identity physical
+    state_container_name_matches_pin "$container_name" "$container_physical" "$container_identity" || return 1
+    [[ -d "$storage_name" && ! -L "$storage_name" ]] || return 1
+    identity=$(path_identity "$storage_name") || return 1
+    [[ "$identity" == "$storage_identity" ]] || return 1
+    physical=$(physical_dir "$storage_name") || return 1
+    [[ "$physical" == "$storage_physical" && "$physical" == "$container_physical"/* ]]
+}
+
+preflight_backup_devices() {
+    local state_device=${STATE_ROOT_IDENTITY%%:*} target_parent target_device pin_index i found
+    [[ -n "$state_device" ]] || return 74
+    install_root_name_matches_pin && pinned_install_names_match || return 65
+    state_cwd_matches_pin && state_name_matches_pin || return 74
+    for ((i=0; i<${#PLAN_ACTION[@]}; i++)); do
+        [[ "${PLAN_ACTION[$i]}" == BACKUP ]] || continue
+        target_parent=${PLAN_TARGET[$i]%/*}
+        found=0
+        for ((pin_index=0; pin_index<PINNED_INSTALL_COUNT; pin_index++)); do
+            [[ "${PINNED_INSTALL_PATH[$pin_index]}" == "$target_parent" ]] || continue
+            target_device=${PINNED_INSTALL_IDENTITY[$pin_index]%%:*}
+            found=1
+            break
+        done
+        [[ $found -eq 1 && -n "$target_device" ]] || return 65
+        if [[ "$target_device" != "$state_device" ]]; then
+            printf '%s: backup target parent is on a different device than the pinned state root: %s; no home or backup files were changed\n' \
+                "$PROGRAM" "${PLAN_PATH[$i]}" >&2
+            return 74
+        fi
+    done
+}
+
 record_transaction_signal() {
     [[ "$PENDING_SIGNAL" == 0 ]] && PENDING_SIGNAL=$1
 }
@@ -1248,43 +1343,60 @@ release_lock() {
 }
 
 begin_transaction_storage() {
-    local timestamp
+    local timestamp container_pin storage_pin child
     state_cwd_matches_pin && state_name_matches_pin || return 74
     timestamp=$(run_without_report_fd date -u +%Y%m%dT%H%M%SZ) || return 74
-    run_without_report_fd mkdir -p -- transactions || return 74
-    TRANSACTION_ROOT="transactions/$timestamp-$$"
-    run_without_report_fd mkdir -- "$TRANSACTION_ROOT" || return 74
-    run_without_report_fd chmod 700 "$TRANSACTION_ROOT" || return 74
+    container_pin=$(pin_state_container transactions) || return $?
+    IFS=$'\t' read -r TRANSACTIONS_ROOT_IDENTITY TRANSACTIONS_ROOT_PHYSICAL <<<"$container_pin"
+    child="$timestamp-$$"
+    TRANSACTION_ROOT="transactions/$child"
+    storage_pin=$(create_pinned_state_storage "$TRANSACTIONS_ROOT_PHYSICAL" \
+        "$TRANSACTIONS_ROOT_IDENTITY" "$child" quarantine 700) || return $?
+    IFS=$'\t' read -r TRANSACTION_ROOT_IDENTITY TRANSACTION_ROOT_PHYSICAL <<<"$storage_pin"
+    state_storage_name_matches_pin transactions "$TRANSACTIONS_ROOT_PHYSICAL" \
+        "$TRANSACTIONS_ROOT_IDENTITY" "$TRANSACTION_ROOT" "$TRANSACTION_ROOT_PHYSICAL" \
+        "$TRANSACTION_ROOT_IDENTITY" || return 74
     QUARANTINE_ROOT="$TRANSACTION_ROOT/quarantine"
-    run_without_report_fd mkdir -- "$QUARANTINE_ROOT" || return 74
+    [[ -d "$QUARANTINE_ROOT" && ! -L "$QUARANTINE_ROOT" ]] || return 74
     honor_pending_signal || return $?
 }
 
 begin_backup() {
-    local timestamp noclobber_was_set=0 open_status=0
+    local timestamp noclobber_was_set=0 open_status=0 container_pin storage_pin child report_creation_path
     state_cwd_matches_pin && state_name_matches_pin || return 74
     timestamp=$(run_without_report_fd date -u +%Y%m%dT%H%M%SZ) || return 74
-    run_without_report_fd mkdir -p -- backups || return 74
-    BACKUP_ROOT="backups/$timestamp-$$"
-    run_without_report_fd mkdir -- "$BACKUP_ROOT" || return 74
+    container_pin=$(pin_state_container backups) || return $?
+    IFS=$'\t' read -r BACKUPS_ROOT_IDENTITY BACKUPS_ROOT_PHYSICAL <<<"$container_pin"
+    child="$timestamp-$$"
+    BACKUP_ROOT="backups/$child"
+    storage_pin=$(create_pinned_state_storage "$BACKUPS_ROOT_PHYSICAL" \
+        "$BACKUPS_ROOT_IDENTITY" "$child" files '') || return $?
+    IFS=$'\t' read -r BACKUP_ROOT_IDENTITY BACKUP_ROOT_PHYSICAL <<<"$storage_pin"
+    state_storage_name_matches_pin backups "$BACKUPS_ROOT_PHYSICAL" "$BACKUPS_ROOT_IDENTITY" \
+        "$BACKUP_ROOT" "$BACKUP_ROOT_PHYSICAL" "$BACKUP_ROOT_IDENTITY" || return 74
     BACKUP_FILES="$BACKUP_ROOT/files"
-    run_without_report_fd mkdir -- "$BACKUP_FILES" || return 74
+    [[ -d "$BACKUP_FILES" && ! -L "$BACKUP_FILES" ]] || return 74
     REPORT_PATH="$BACKUP_ROOT/report.tsv"
+    report_creation_path="$BACKUP_ROOT_PHYSICAL/report.tsv"
     [[ -o noclobber ]] && noclobber_was_set=1
     set -C
-    exec 9>"$REPORT_PATH" || open_status=$?
+    exec 9>"$report_creation_path" || open_status=$?
     [[ $noclobber_was_set -eq 1 ]] || set +C
     [[ $open_status -eq 0 ]] || return 74
     REPORT_FD_OPEN=1
-    [[ -f "$REPORT_PATH" && ! -L "$REPORT_PATH" ]] || return 74
-    REPORT_IDENTITY=$(path_identity "$REPORT_PATH") || return 74
+    [[ -f "$report_creation_path" && ! -L "$report_creation_path" ]] || return 74
+    REPORT_IDENTITY=$(path_identity "$report_creation_path") || return 74
     [[ -n "$REPORT_IDENTITY" ]] || return 74
-    REPORT_RECOVERY_PARENT_PHYSICAL="$STATE_ROOT_PHYSICAL/$BACKUP_ROOT"
-    REPORT_RECOVERY_PARENT_IDENTITY=$(path_identity "$BACKUP_ROOT") || return 74
+    state_storage_name_matches_pin backups "$BACKUPS_ROOT_PHYSICAL" "$BACKUPS_ROOT_IDENTITY" \
+        "$BACKUP_ROOT" "$BACKUP_ROOT_PHYSICAL" "$BACKUP_ROOT_IDENTITY" || return 74
+    REPORT_RECOVERY_PARENT_PHYSICAL=$BACKUP_ROOT_PHYSICAL
+    REPORT_RECOVERY_PARENT_IDENTITY=$BACKUP_ROOT_IDENTITY
     REPORT_RECOVERY_PATH="$REPORT_RECOVERY_PARENT_PHYSICAL/report-recovery.tsv"
     [[ ! -e "$REPORT_RECOVERY_PATH" && ! -L "$REPORT_RECOVERY_PATH" ]] || return 74
     install_test_hook report_recovery_before_link "$REPORT_RECOVERY_PATH" || return $?
-    run_without_report_fd "$TRANSACTION_LINK_COMMAND" "$REPORT_PATH" "$REPORT_RECOVERY_PATH" || return 74
+    state_storage_name_matches_pin backups "$BACKUPS_ROOT_PHYSICAL" "$BACKUPS_ROOT_IDENTITY" \
+        "$BACKUP_ROOT" "$BACKUP_ROOT_PHYSICAL" "$BACKUP_ROOT_IDENTITY" || return 74
+    run_without_report_fd "$TRANSACTION_LINK_COMMAND" "$report_creation_path" "$REPORT_RECOVERY_PATH" || return 74
     [[ -f "$REPORT_RECOVERY_PATH" && ! -L "$REPORT_RECOVERY_PATH" ]] || return 74
     REPORT_RECOVERY_IDENTITY=$(path_identity "$REPORT_RECOVERY_PATH") || return 74
     [[ "$REPORT_RECOVERY_IDENTITY" == "$REPORT_IDENTITY" ]] || return 74
@@ -2862,6 +2974,7 @@ start_transaction() {
     trap 'record_transaction_signal 143' TERM
     pin_planned_install_root || return $?
     pin_state_root || return $?
+    [[ "$PLAN_NEEDS_BACKUP" == 0 ]] || preflight_backup_devices || return $?
     honor_pending_signal || return $?
     acquire_lock || return $?
     begin_transaction_storage || return $?

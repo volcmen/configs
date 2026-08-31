@@ -120,6 +120,10 @@ checkout are created. Directory/type conflicts remain blocked even with
 `--backup`. `install --apply` without `--backup` can link missing targets but
 refuses existing regular files and foreign links.
 
+Backup moves require each existing target parent and the pinned state root to
+be on the same filesystem. A cross-filesystem plan is rejected before any home
+target or backup set is changed; the installer does not fall back to copying.
+
 No install command runs a package manager, changes the login shell, enables a
 service, or reloads Kitty, Zellij, Hyprland, Waybar, or any other process.
 
@@ -155,6 +159,10 @@ containment or ownership proof is lost, apply exits nonzero and rollback uses
 the recorded physical parent and artifact identity, preserves foreign
 arrivals, and reports the last identity-validated recovery location rather
 than deleting without proof.
+
+The managed `transactions` and `backups` children of the pinned state root are
+created or accepted only as real, physically contained directories. Symlinked
+or identity-swapped containers are refused rather than followed.
 
 The report is created without clobbering and retained by an open file handle for
 the whole transaction. Each backup set permanently retains a separately pinned
