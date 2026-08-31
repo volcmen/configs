@@ -97,6 +97,8 @@ run_test() {
 validate_selected_tests() {
     local selected_name matched_name matched
 
+    [[ ${#SELECTED_TESTS[@]} -eq 0 ]] && return 0
+
     for selected_name in "${SELECTED_TESTS[@]}"; do
         matched=0
         for matched_name in "${MATCHED_TESTS[@]:-}"; do
@@ -3645,6 +3647,19 @@ test_waybar_uses_lua_workspace_dispatch_and_uwsm_logout() {
     grep -Fq '"logout":   "uwsm stop",' "$waybar"
 }
 
+test_no_argument_selection_validation_passes_in_self_runner() {
+    local output status
+
+    if output="$(DOTFILES_TEST_SELECTION_VALIDATION_ONLY=1 \
+        /bin/bash "$PROJECT_ROOT/tests/dotfiles-test.sh" 2>&1)"; then
+        status=0
+    else
+        status=$?
+    fi
+    [[ "$status" -eq 0 ]] || fail "no-argument selection validation failed: $output" || return 1
+    [[ "$output" == *'0 passed; 0 failed'* ]]
+}
+
 test_focused_test_selection_rejects_unknown_names_and_runs_known_once() {
     local output status known_count
 
@@ -3718,6 +3733,13 @@ test_documentation_records_operations_and_compatibility_evidence() {
         grep -Fq "$evidence" "$audit" || return 1
     done
 }
+
+if [[ "${DOTFILES_TEST_SELECTION_VALIDATION_ONLY:-}" == 1 ]]; then
+    validate_selected_tests
+    printf '%s passed; %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
+    [[ "$FAIL_COUNT" -eq 0 ]]
+    exit
+fi
 
 run_test test_help
 run_test test_unknown_command_fails
@@ -3857,6 +3879,7 @@ run_test test_install_rejects_home_swapped_before_pinning
 run_test test_hyprland_animations_preserve_values_and_curve_types
 run_test test_hypridle_uses_lua_dpms_dispatch
 run_test test_waybar_uses_lua_workspace_dispatch_and_uwsm_logout
+run_test test_no_argument_selection_validation_passes_in_self_runner
 run_test test_focused_test_selection_rejects_unknown_names_and_runs_known_once
 run_test test_dotfiles_copy_dispatches_portably
 run_test test_shared_terminal_behavior_is_canonical
