@@ -377,7 +377,7 @@ probe_hyprland_runtime_validation() {
     trap - EXIT HUP INT TERM
     if [[ $status -eq 0 && $output_present -eq 0 ]]; then
         HYPRLAND_RUNTIME_STATUS=0
-        HYPRLAND_RUNTIME_DETAIL='Hyprland runtime validation passed'
+        HYPRLAND_RUNTIME_DETAIL='hyprctl configerrors reported no diagnostics'
     else
         HYPRLAND_RUNTIME_STATUS=1
         HYPRLAND_RUNTIME_DETAIL=$(validation_detail "$detail" "$status" "$output_present")
@@ -385,19 +385,18 @@ probe_hyprland_runtime_validation() {
 }
 
 run_hyprland_runtime_validation() {
-    local app=$1 path=$2
     probe_hyprland_runtime_validation
     case "$HYPRLAND_RUNTIME_STATUS" in
         0)
-        printf 'PASS %s %s: Hyprland runtime validation passed\n' "$app" "$path"
-        return 0
+            printf 'PASS hyprland live-session: %s\n' "$HYPRLAND_RUNTIME_DETAIL"
+            return 0
             ;;
         125)
-            printf 'RUNTIME UNVERIFIED %s %s: %s\n' "$app" "$path" "$HYPRLAND_RUNTIME_DETAIL"
+            printf 'RUNTIME UNVERIFIED hyprland live-session: %s\n' "$HYPRLAND_RUNTIME_DETAIL"
             return 0
             ;;
         *)
-            printf 'BLOCKED %s %s: %s\n' "$app" "$path" "$HYPRLAND_RUNTIME_DETAIL"
+            printf 'BLOCKED hyprland live-session: %s\n' "$HYPRLAND_RUNTIME_DETAIL"
             return 1
             ;;
     esac
@@ -1369,7 +1368,7 @@ command_install() {
 
 command_check() {
     local host source validator_detail_output validator_status runtime_status
-    local i blocked=0
+    local i blocked=0 hyprland_runtime_needed=0
 
     validation_target "$@"
     detect_host >/dev/null
@@ -1412,12 +1411,17 @@ command_check() {
             if [[ "$host" != arch || "$VALIDATION_TARGET" != arch ]]; then
                 printf 'RUNTIME UNVERIFIED %s %s: requires an Arch Hyprland session\n' "${MF_APP[$i]}" "${MF_PATH[$i]}"
             else
-                run_hyprland_runtime_validation "${MF_APP[$i]}" "${MF_PATH[$i]}"
-                runtime_status=$?
-                [[ $runtime_status -eq 0 ]] || blocked=1
+                printf 'RUNTIME UNVERIFIED %s %s: canonical candidate provenance and freshness are unverified\n' "${MF_APP[$i]}" "${MF_PATH[$i]}"
+                hyprland_runtime_needed=1
             fi
         fi
     done
+
+    if [[ $hyprland_runtime_needed -eq 1 ]]; then
+        run_hyprland_runtime_validation
+        runtime_status=$?
+        [[ $runtime_status -eq 0 ]] || blocked=1
+    fi
 
     [[ $blocked -eq 0 ]]
 }

@@ -172,6 +172,12 @@ the checks, and manually verify bindings, layout, theme, rules, startup,
 idle/lock/DPMS, launcher, notifications, portal, terminal, and clipboard
 behavior. Keep every unobserved item `RUNTIME UNVERIFIED`.
 
+`hyprctl configerrors` checks the one running Hyprland session. The manager
+reports that probe once as `hyprland live-session`; even a clean probe does not
+prove that any canonical Lua candidate is loaded or fresh, so candidate files
+remain `RUNTIME UNVERIFIED` until that provenance is established. Any live
+diagnostic still blocks the overall check.
+
 The tool never reloads Hyprland or services. Apply only after the read-only
 results and runtime checks are accepted, using the explicit backup command from
 the previous section.

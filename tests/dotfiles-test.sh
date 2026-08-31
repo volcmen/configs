@@ -234,16 +234,16 @@ STUB
         assert_contains 'RUNTIME UNVERIFIED hyprland .config/hypr/hyprland.lua: requires an Arch Hyprland session'
 }
 
-test_check_caches_clean_hyprland_runtime_probe() {
+test_check_reports_clean_hyprland_session_separately_from_candidates() {
     local validator_bin
     new_fixture
     validator_bin="$TEST_TMP/validator-bin"
     mkdir -p "$validator_bin" "$TEST_TMP/repo/home/.config/hypr"
-    printf 'return {}\n' >"$TEST_TMP/repo/home/.config/hypr/one.lua"
-    printf 'return {}\n' >"$TEST_TMP/repo/home/.config/hypr/two.lua"
-    printf 'return {}\n' >"$TEST_TMP/repo/home/.config/hypr/three.lua"
+    printf 'return { candidate = "one" }\n' >"$TEST_TMP/repo/home/.config/hypr/one.lua"
+    printf 'return { candidate = "different-from-live-session" }\n' >"$TEST_TMP/repo/home/.config/hypr/different.lua"
+    printf 'return { candidate = "three" }\n' >"$TEST_TMP/repo/home/.config/hypr/three.lua"
     write_os_release 'ID=arch'
-    write_manifest $'hyprland|arch|file|.config/hypr/one.lua|hyprland-lua|yes|1\nhyprland|arch|file|.config/hypr/two.lua|hyprland-lua|yes|1\nhyprland|arch|file|.config/hypr/three.lua|hyprland-lua|yes|1'
+    write_manifest $'hyprland|arch|file|.config/hypr/one.lua|hyprland-lua|yes|1\nhyprland|arch|file|.config/hypr/different.lua|hyprland-lua|yes|1\nhyprland|arch|file|.config/hypr/three.lua|hyprland-lua|yes|1'
     cat >"$validator_bin/luac" <<'STUB'
 #!/bin/sh
 exit 0
@@ -257,7 +257,12 @@ STUB
     DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" HYPRLAND_INSTANCE_SIGNATURE=active run_cli check --target arch
     assert_status 0 && \
         [[ "$(wc -l <"$TEST_TMP/hyprctl-calls")" -eq 1 ]] && \
-        [[ "$(printf '%s\n' "$CLI_OUTPUT" | /usr/bin/grep -c 'Hyprland runtime validation passed')" -eq 3 ]]
+        [[ "$(<"$TEST_TMP/hyprctl-calls")" == configerrors ]] && \
+        [[ "$(printf '%s\n' "$CLI_OUTPUT" | /usr/bin/grep -c '^RUNTIME UNVERIFIED hyprland .config/hypr/.*: canonical candidate provenance and freshness are unverified$')" -eq 3 ]] && \
+        [[ "$(printf '%s\n' "$CLI_OUTPUT" | /usr/bin/grep -c '^PASS hyprland live-session: hyprctl configerrors reported no diagnostics$')" -eq 1 ]] && \
+        [[ "$CLI_OUTPUT" != *'PASS hyprland .config/hypr/one.lua: Hyprland runtime validation passed'* ]] && \
+        [[ "$CLI_OUTPUT" != *'PASS hyprland .config/hypr/different.lua: Hyprland runtime validation passed'* ]] && \
+        [[ "$CLI_OUTPUT" != *'PASS hyprland .config/hypr/three.lua: Hyprland runtime validation passed'* ]]
 }
 
 test_check_blocks_hyprland_runtime_error_text_with_success_status() {
@@ -284,7 +289,8 @@ STUB
     DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" HYPRLAND_INSTANCE_SIGNATURE=active run_cli check --target arch
     assert_status 1 && \
         [[ "$(wc -l <"$TEST_TMP/hyprctl-calls")" -eq 1 ]] && \
-        [[ "$(printf '%s\n' "$CLI_OUTPUT" | /usr/bin/grep -c '^BLOCKED hyprland')" -eq 3 ]] && \
+        [[ "$(printf '%s\n' "$CLI_OUTPUT" | /usr/bin/grep -c '^RUNTIME UNVERIFIED hyprland .config/hypr/.*: canonical candidate provenance and freshness are unverified$')" -eq 3 ]] && \
+        [[ "$(printf '%s\n' "$CLI_OUTPUT" | /usr/bin/grep -c '^BLOCKED hyprland live-session:')" -eq 1 ]] && \
         assert_contains 'Config error: invalid monitor rule'
 }
 
@@ -310,7 +316,8 @@ STUB
     DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" HYPRLAND_INSTANCE_SIGNATURE=active run_cli check --target arch
     assert_status 1 && \
         [[ "$(wc -l <"$TEST_TMP/hyprctl-calls")" -eq 1 ]] && \
-        assert_contains 'BLOCKED hyprland .config/hypr/one.lua: validator reported diagnostic output'
+        assert_contains 'RUNTIME UNVERIFIED hyprland .config/hypr/one.lua: canonical candidate provenance and freshness are unverified' && \
+        assert_contains 'BLOCKED hyprland live-session: validator reported diagnostic output'
 }
 
 test_check_blocks_nul_only_hyprland_runtime_output() {
@@ -335,7 +342,8 @@ STUB
     DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" HYPRLAND_INSTANCE_SIGNATURE=active run_cli check --target arch
     assert_status 1 && \
         [[ "$(wc -l <"$TEST_TMP/hyprctl-calls")" -eq 1 ]] && \
-        assert_contains 'BLOCKED hyprland .config/hypr/one.lua: validator reported diagnostic output'
+        assert_contains 'RUNTIME UNVERIFIED hyprland .config/hypr/one.lua: canonical candidate provenance and freshness are unverified' && \
+        assert_contains 'BLOCKED hyprland live-session: validator reported diagnostic output'
 }
 
 test_check_sanitizes_validator_control_diagnostics() {
@@ -1459,12 +1467,29 @@ test_shared_fish_yazi_and_fontconfig_are_portable() {
     xmllint --noout "$fonts_conf" "$readability_conf"
 }
 
-test_hyprland_animations_use_curve_field() {
+test_hyprland_animations_preserve_values_and_curve_types() {
     local looknfeel="$PROJECT_ROOT/home/.config/hypr/hyprland/looknfeel.lua"
+    local actual expected
 
-    ! grep -Eq 'hl\.animation.*(bezier|spring)[[:space:]]*=' "$looknfeel" || return 1
-    grep -Fq 'hl.animation({ leaf = "global", enabled = true, speed = 10, curve = "default" })' "$looknfeel" || return 1
-    grep -Fq 'hl.animation({ leaf = "windows", enabled = true, speed = 4.79, curve = "easy" })' "$looknfeel"
+    actual="$(grep '^hl\.animation' "$looknfeel")"
+    expected='hl.animation({ leaf = "global", enabled = true, speed = 10, bezier = "default" })
+hl.animation({ leaf = "border", enabled = true, speed = 5.39, bezier = "easeOutQuint" })
+hl.animation({ leaf = "windows", enabled = true, speed = 4.79, spring = "easy" })
+hl.animation({ leaf = "windowsIn", enabled = true, speed = 4.1, spring = "easy", style = "popin 87%" })
+hl.animation({ leaf = "windowsOut", enabled = true, speed = 1.49, bezier = "linear", style = "popin 87%" })
+hl.animation({ leaf = "fadeIn", enabled = true, speed = 1.73, bezier = "almostLinear" })
+hl.animation({ leaf = "fadeOut", enabled = true, speed = 1.46, bezier = "almostLinear" })
+hl.animation({ leaf = "fade", enabled = true, speed = 3.03, bezier = "quick" })
+hl.animation({ leaf = "layers", enabled = true, speed = 3.81, bezier = "easeOutQuint" })
+hl.animation({ leaf = "layersIn", enabled = true, speed = 4, bezier = "easeOutQuint", style = "fade" })
+hl.animation({ leaf = "layersOut", enabled = true, speed = 1.5, bezier = "linear", style = "fade" })
+hl.animation({ leaf = "fadeLayersIn", enabled = true, speed = 1.79, bezier = "almostLinear" })
+hl.animation({ leaf = "fadeLayersOut", enabled = true, speed = 1.39, bezier = "almostLinear" })
+hl.animation({ leaf = "workspaces", enabled = true, speed = 1.94, bezier = "almostLinear", style = "fade" })
+hl.animation({ leaf = "workspacesIn", enabled = true, speed = 1.21, bezier = "almostLinear", style = "fade" })
+hl.animation({ leaf = "workspacesOut", enabled = true, speed = 1.94, bezier = "almostLinear", style = "fade" })
+hl.animation({ leaf = "zoomFactor", enabled = true, speed = 7, bezier = "quick" })'
+    [[ "$actual" == "$expected" ]] || fail "Hyprland animation contract changed; actual: $actual"
 }
 
 test_hypridle_uses_lua_dpms_dispatch() {
@@ -1543,7 +1568,7 @@ run_test test_check_blocks_malformed_files_with_available_validators
 run_test test_check_passes_valid_file
 run_test test_check_marks_missing_native_validator_runtime_unverified
 run_test test_check_marks_arch_hyprland_static_only_on_macos
-run_test test_check_caches_clean_hyprland_runtime_probe
+run_test test_check_reports_clean_hyprland_session_separately_from_candidates
 run_test test_check_blocks_hyprland_runtime_error_text_with_success_status
 run_test test_check_blocks_newline_only_hyprland_runtime_output
 run_test test_check_blocks_nul_only_hyprland_runtime_output
@@ -1602,7 +1627,7 @@ run_test test_install_blocks_symlinked_parent
 run_test test_install_rechecks_source_after_parent_preparation
 run_test test_install_does_not_follow_parent_swapped_before_mkdir
 run_test test_install_rejects_home_swapped_before_pinning
-run_test test_hyprland_animations_use_curve_field
+run_test test_hyprland_animations_preserve_values_and_curve_types
 run_test test_hypridle_uses_lua_dpms_dispatch
 run_test test_waybar_uses_lua_workspace_dispatch_and_uwsm_logout
 run_test test_dotfiles_copy_dispatches_portably

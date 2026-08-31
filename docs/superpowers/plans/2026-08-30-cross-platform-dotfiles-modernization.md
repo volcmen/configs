@@ -41,7 +41,7 @@
 | `home/.config/zellij/config.kdl` | Canonical bindings plus platform-neutral clipboard command. |
 | `home/.config/yazi/keymap.toml` | Canonical keymap with native per-OS clipboard bindings. |
 | `home/.config/fontconfig/conf.d/99-readability.conf.backup` | Delete after proving it is an unused backup. |
-| `home/.config/hypr/hyprland/looknfeel.lua` | Current Hyprland Lua animation API names while preserving curve values. |
+| `home/.config/hypr/hyprland/looknfeel.lua` | Current Hyprland Lua animation selector fields while preserving curve values. |
 | `home/.config/hypr/hypridle.conf` | Current Lua-dispatch DPMS commands with unchanged timeouts. |
 | `home/.config/waybar/config.jsonc` | Current Lua-dispatch workspace actions and UWSM logout. |
 | `docs/compatibility/2026-08-30-platform-audit.md` | Evidence, versions, static/runtime boundaries, live drift, and Arch handoff results. |
@@ -1057,7 +1057,12 @@ other BLOCKED with validator stderr summarized
 For `hyprland-lua`, `0` on macOS still emits both `STATIC PASS` and
 `RUNTIME UNVERIFIED ... requires an Arch Hyprland session`. On Arch, run
 `hyprctl configerrors` only when `$HYPRLAND_INSTANCE_SIGNATURE` is non-empty;
-otherwise report runtime unverified. Never reload.
+otherwise report runtime unverified. Treat this as one global live-session
+probe: every canonical Lua candidate remains `RUNTIME UNVERIFIED` unless its
+loaded provenance and freshness are established, a clean probe is reported
+once as a separate `PASS hyprland live-session` result, and any diagnostic or
+probe error is reported once as a global `BLOCKED hyprland live-session`
+result. Never reload.
 
 - [ ] **Step 4: Run the manager checkpoint**
 
@@ -1276,7 +1281,7 @@ git commit -m "♻️ make shared shell and file configs portable"
 
 **Interfaces:**
 - Consumes: current Hyprland Lua configuration and official 0.55+ APIs.
-- Produces: current `curve` animation field, Lua DPMS dispatch expressions, UWSM logout; no binding or visual-value changes.
+- Produces: current `bezier`/`spring` animation selector fields, Lua DPMS dispatch expressions, UWSM logout; no binding or visual-value changes.
 
 - [ ] **Step 1: Capture behavior-sensitive hashes and add failing syntax assertions**
 
@@ -1299,12 +1304,13 @@ efaf26481d442ef1d9712b85d88b96d79cb107f90ba95320a1e6d426678a4efd  home/.config/h
 ```
 
 Verify the baseline with the same `shasum -a 256` command before editing. Stop
-if any value differs, because the preservation baseline has changed. Add tests
-rejecting `bezier =` and `spring =` inside `hl.animation`, rejecting
-`hyprctl dispatch dpms`, and requiring:
+if any value differs, because the preservation baseline has changed. Add a test
+that compares every `hl.animation` row with the preserved ordered baseline,
+rejects `curve =` inside `hl.animation`, and requires `bezier =` for every
+Bézier name and `spring = "easy"` for the existing spring. Also reject
+`hyprctl dispatch dpms` and require:
 
 ```text
-curve = "<existing curve name>"
 hyprctl dispatch 'hl.dsp.dpms({ action = "disable" })'
 hyprctl dispatch 'hl.dsp.dpms({ action = "enable" })'
 uwsm stop
@@ -1318,9 +1324,9 @@ Expected: Hyprland syntax assertions FAIL.
 
 - [ ] **Step 3: Update animation field names only**
 
-In every `hl.animation` call in `looknfeel.lua`, replace the field name
-`bezier` or `spring` with `curve`. Preserve the existing leaf, enabled value,
-speed, curve-name string, style, order, and comments exactly.
+In every `hl.animation` call in `looknfeel.lua`, use `bezier` for the existing
+Bézier names and `spring` for the existing `easy` spring. Preserve the leaf,
+enabled value, speed, curve-name string, style, order, and comments exactly.
 
 - [ ] **Step 4: Update only DPMS and logout command syntax**
 
@@ -1559,7 +1565,8 @@ zellij --config "$PWD/home/.config/zellij/config.kdl" setup --check
 
 Expected: `detect` prints `arch`; no macOS-only deployment decisions; Fuzzel and
 Zellij exit `0`; `hyprctl configerrors` is empty or contains only documented
-pre-existing errors. Do not reload Hyprland.
+pre-existing errors. This is global running-session evidence, not proof that
+any canonical candidate was loaded or is fresh. Do not reload Hyprland.
 
 - [ ] **Step 2: Record actual Arch versions and resolve only verified defects**
 
@@ -1596,6 +1603,8 @@ or compositor action.
 Verify and record:
 
 - Hyprland reports no new config errors;
+- canonical candidates remain runtime-unverified until loaded provenance and
+  freshness are established;
 - all existing app, clipboard, group, media, mouse, tiling, workspace, resize,
   and lock bindings behave as before;
 - Waybar modules/style/power menu render as before;

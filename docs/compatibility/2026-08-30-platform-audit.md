@@ -7,7 +7,9 @@ another host.
 
 ## Confidence language
 
-- `PASS` means the applicable validator ran successfully on the physical host.
+- `PASS` means the named scope passed its applicable physical-host check. A
+  `PASS hyprland live-session` line applies only to the running session and is
+  never evidence that a canonical candidate was loaded or is fresh.
 - `STATIC PASS` means source syntax or structure passed off-platform; it does
   not establish target runtime behavior.
 - `RUNTIME UNVERIFIED` means a required native binary, application-safe check,
@@ -76,7 +78,7 @@ remain excluded.
 | --- | --- | --- |
 | Required | Four tracked Kitty/Zellij files differed from the live macOS files. | Reconciled deliberately in `fdc7cd1`; exact paths and changes are recorded below. |
 | Required | Shared clipboard commands were platform-specific. | Zellij now calls `dotfiles-copy`; Yazi uses its native Linux/macOS selectors. Automated tests cover both dispatch paths. |
-| Required | Hyprland Lua-era animation/dispatcher syntax and UWSM logout needed the reviewed forms. | Field names changed to `curve`; DPMS/workspace commands use the Lua dispatchers; logout uses `uwsm stop` in `e062d2e`. No reload was run. See the [Hyprland start guide](https://wiki.hypr.land/Configuring/Start/). |
+| Required | Hyprland Lua-era animation/dispatcher syntax and UWSM logout needed the reviewed forms. | Animation selectors use `bezier` for the existing Bézier names and `spring` for the existing `easy` spring; DPMS/workspace commands use the Lua dispatchers; logout uses `uwsm stop`. The selector correction is grounded in the [Hyprland 0.56.2 Lua binding](https://github.com/hyprwm/Hyprland/blob/v0.56.2/src/config/lua/bindings/LuaBindingsConfigRules.cpp#L400-L423) and [0.56.2 example](https://github.com/hyprwm/Hyprland/blob/v0.56.2/example/hyprland.lua#L134-L150). No reload was run. See also the [Hyprland animation guide](https://wiki.hypr.land/configuring/core/animations/) and [start guide](https://wiki.hypr.land/Configuring/Start/). |
 | Recommended | Optional Fish tools and the Homebrew path needed explicit availability guards. | Guards were added in `e651449` without changing successful initialization order. |
 | Recommended | The inactive Fontconfig alternative obscured canonical ownership. | Decision and exact evidence are recorded in the Fontconfig section below. |
 | Optional | Theme, fonts, spacing, layouts, animations, bindings, and startup workflow redesigns. | Excluded. Existing user-visible values and behavior-sensitive files were preserved. |
@@ -141,6 +143,13 @@ where tools were available. Hyprland session validation, Fuzzel, Mako,
 hypridle, hyprlock, hyprpaper, hyprsunset, and other native/session-sensitive
 checks remain `RUNTIME UNVERIFIED`.
 
+On an active Arch session, `hyprctl configerrors` is captured once and reported
+as a separate `hyprland live-session` result. A clean result does not establish
+which canonical Lua candidate is loaded or whether it is fresh, so every
+candidate remains `RUNTIME UNVERIFIED`; any diagnostic text or probe failure
+globally blocks the check. The capture remains byte-safe for newline/NUL-only
+diagnostics, sanitizes controls, is cached, and never triggers a reload.
+
 This macOS result is only the static evidence feeding the operator gate below.
 It must never be promoted to an Arch runtime pass or used to replace an
 `unverified` installed version.
@@ -165,8 +174,10 @@ The preview is accepted only when `detect` reports `arch`; `diff` and the dry-ru
 `install` contain only expected Arch/shared deployment decisions and no
 macOS-only decisions; Fuzzel and Zellij both exit 0; and
 `hyprctl configerrors` is empty or contains only explicitly documented
-pre-existing errors. Every proposed drift, missing path, creation, or backup
-must be understood and accepted before applying.
+pre-existing errors. That result describes the current live session only;
+canonical candidates remain runtime-unverified until loaded provenance and
+freshness are demonstrated. Every proposed drift, missing path, creation, or
+backup must be understood and accepted before applying.
 
 If a native validator fails, stop before apply. Add a failing regression test,
 make the smallest behavior-preserving correction in the exact owning file,
