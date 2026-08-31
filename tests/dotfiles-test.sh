@@ -43,6 +43,7 @@ run_cli() {
         DOTFILES_TEST_TRANSACTION_KERNEL="${DOTFILES_TEST_TRANSACTION_KERNEL:-}" \
         DOTFILES_TEST_STAT_COMMAND="${DOTFILES_TEST_STAT_COMMAND:-}" \
         DOTFILES_TEST_MOVE_COMMAND="${DOTFILES_TEST_MOVE_COMMAND:-}" \
+        DOTFILES_TEST_REPORT_PARTIAL_TYPE="${DOTFILES_TEST_REPORT_PARTIAL_TYPE:-}" \
         PATH="${DOTFILES_TEST_PATH:-$PATH}" \
         "$TEST_TMP/repo/bin/dotfiles" "$@" 2>&1)"; then
         CLI_STATUS=0
@@ -1388,6 +1389,216 @@ STUB
     [[ -z "$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config' -type f -print)" ]]
 }
 
+test_install_backup_target_pre_syscall_swap_restores_unowned_inode() {
+    local hook target expected_identity substitute_identity
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'original\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    target="$TEST_TMP/home/.config/demo/config"
+    expected_identity="$(/usr/bin/stat -f '%d:%i' "$target")"
+    hook="$TEST_TMP/swap-target-immediately-before-stage-mv"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = move_before_syscall ] && [ "\$2" = backup_target_stage ]; then
+    : >"$TEST_TMP/backup-target-pre-syscall-reached"
+    /bin/mv -- "\$3" "\$3.expected"
+    printf 'foreign-source\n' >"\$3"
+    /usr/bin/stat -f '%d:%i' "\$3" >"$TEST_TMP/backup-target-substitute-identity"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'pre-syscall target substitute was treated as owned' || return 1
+    [[ -f "$TEST_TMP/backup-target-pre-syscall-reached" ]] || fail 'target pre-syscall seam was not reached' || return 1
+    substitute_identity="$(<"$TEST_TMP/backup-target-substitute-identity")"
+    [[ -f "$target" && "$(<"$target")" == foreign-source ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$target")" == "$substitute_identity" ]] || return 1
+    [[ -f "$target.expected" && "$(<"$target.expected")" == original ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$target.expected")" == "$expected_identity" ]] || return 1
+    assert_contains "UNOWNED_RESTORED .config/demo/config identity=$substitute_identity location=$target" || return 1
+    [[ "$CLI_OUTPUT" != *'identity=F:'* ]] || fail 'backup fingerprint was mislabeled as an inode identity'
+}
+
+test_install_backup_target_pre_syscall_swap_reports_unowned_path_unavailable() {
+    local hook move_stub target substitute_identity report expected_row
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'original\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    target="$TEST_TMP/home/.config/demo/config"
+    hook="$TEST_TMP/swap-target-before-unlocatable-move"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = move_before_syscall ] && [ "\$2" = backup_target_stage ]; then
+    : >"$TEST_TMP/unlocatable-target-pre-syscall-reached"
+    /bin/mv -- "\$3" "\$3.expected"
+    printf 'foreign-unlocatable\n' >"\$3"
+    /usr/bin/stat -f '%d:%i' "\$3" >"$TEST_TMP/unlocatable-substitute-identity"
+fi
+STUB
+    chmod +x "$hook"
+    move_stub="$TEST_TMP/mv-away-from-known-candidates"
+    cat >"$move_stub" <<STUB
+#!/bin/sh
+previous=
+source=
+for argument in "\$@"; do
+    source=\$previous
+    previous=\$argument
+done
+if [ -f "$TEST_TMP/unlocatable-target-pre-syscall-reached" ] && \
+    [ ! -f "$TEST_TMP/unlocatable-move-consumed" ]; then
+    : >"$TEST_TMP/unlocatable-move-consumed"
+    /bin/mv -- "\$source" "$TEST_TMP/unowned-moved-away"
+    exit \$?
+fi
+exec /bin/mv "\$@"
+STUB
+    chmod +x "$move_stub"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" DOTFILES_TEST_MOVE_COMMAND="$move_stub" \
+        run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'unlocatable syscall-selected inode falsely succeeded' || return 1
+    [[ -f "$TEST_TMP/unlocatable-target-pre-syscall-reached" ]] || fail 'unlocatable pre-syscall seam was not reached' || return 1
+    substitute_identity="$(<"$TEST_TMP/unlocatable-substitute-identity")"
+    [[ -f "$TEST_TMP/unowned-moved-away" && "$(<"$TEST_TMP/unowned-moved-away")" == foreign-unlocatable ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/unowned-moved-away")" == "$substitute_identity" ]] || return 1
+    [[ -f "$target.expected" && "$(<"$target.expected")" == original ]] || return 1
+    report="$(find "$TEST_TMP/state/backups" -name report.tsv -type f -print)"
+    expected_row="$(printf 'UNOWNED_DISPLACED\t.config/demo/config\t%s\tUNAVAILABLE identity=%s' \
+        "$substitute_identity" "$substitute_identity")"
+    grep -Fqx "$expected_row" "$report" || fail "path-unavailable displacement was not reported: $(<"$report")" || return 1
+    assert_contains "UNOWNED_DISPLACED .config/demo/config identity=$substitute_identity recovery-path-unavailable" || return 1
+    [[ "$CLI_OUTPUT" != *'identity=F:'* ]] || fail 'backup fingerprint was mislabeled as an inode identity'
+}
+
+test_install_backup_publish_pre_syscall_swap_retains_unowned_inode() {
+    local hook move_stub target expected_identity substitute_identity displaced report expected_row blocker
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'original\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    target="$TEST_TMP/home/.config/demo/config"
+    expected_identity="$(/usr/bin/stat -f '%d:%i' "$target")"
+    hook="$TEST_TMP/swap-stage-immediately-before-backup-mv"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = move_before_syscall ] && [ "\$2" = backup_stage_publish ]; then
+    : >"$TEST_TMP/backup-publish-pre-syscall-reached"
+    /bin/mv -- "\$3" "\$3.expected"
+    printf 'foreign-stage-source\n' >"\$3"
+    /usr/bin/stat -f '%d:%i' "\$3" >"$TEST_TMP/backup-publish-substitute-identity"
+fi
+STUB
+    chmod +x "$hook"
+    move_stub="$TEST_TMP/mv-with-stage-restore-blocker"
+    cat >"$move_stub" <<STUB
+#!/bin/sh
+previous=
+source=
+destination=
+for argument in "\$@"; do
+    source=\$previous
+    previous=\$argument
+done
+destination=\$previous
+/bin/mv "\$@"
+result=\$?
+case "\$source:\$destination" in
+    *.dotfiles-backup-*:config)
+        if [ -f "$TEST_TMP/backup-publish-pre-syscall-reached" ]; then
+            printf 'foreign-stage-blocker\n' >"\$source"
+        fi
+        ;;
+esac
+exit "\$result"
+STUB
+    chmod +x "$move_stub"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" DOTFILES_TEST_MOVE_COMMAND="$move_stub" \
+        run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'pre-syscall backup substitute was treated as owned' || return 1
+    [[ -f "$TEST_TMP/backup-publish-pre-syscall-reached" ]] || fail 'backup publish pre-syscall seam was not reached' || return 1
+    substitute_identity="$(<"$TEST_TMP/backup-publish-substitute-identity")"
+    [[ -f "$target" && "$(<"$target")" == original ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$target")" == "$expected_identity" ]] || return 1
+    displaced="$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config' -type f -print)"
+    [[ -n "$displaced" && "$(<"$displaced")" == foreign-stage-source ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$displaced")" == "$substitute_identity" ]] || return 1
+    blocker="$(find "$TEST_TMP/home/.config/demo" -name '.dotfiles-backup-*' -type f -print)"
+    [[ -n "$blocker" && "$(<"$blocker")" == foreign-stage-blocker ]] || return 1
+    report="$(find "$TEST_TMP/state/backups" -name report.tsv -type f -print)"
+    expected_row="$(printf 'UNOWNED_DISPLACED\t.config/demo/config\t%s\t%s' "$substitute_identity" "$displaced")"
+    grep -Fqx "$expected_row" "$report" || fail "unowned backup displacement was not reported: $(<"$report")" || return 1
+    assert_contains "UNOWNED_DISPLACED .config/demo/config identity=$substitute_identity location=$displaced"
+}
+
+test_install_link_publish_pre_syscall_swap_retains_unowned_inode() {
+    local hook move_stub target substitute_identity displaced backup report expected_row blocker
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'original\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    target="$TEST_TMP/home/.config/demo/config"
+    hook="$TEST_TMP/swap-link-immediately-before-publish-mv"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = move_before_syscall ] && [ "\$2" = link_publish ]; then
+    : >"$TEST_TMP/link-publish-pre-syscall-reached"
+    /bin/mv -- "\$3" "\$3.expected"
+    printf 'foreign-link-source\n' >"\$3"
+    /usr/bin/stat -f '%d:%i' "\$3" >"$TEST_TMP/link-publish-substitute-identity"
+fi
+STUB
+    chmod +x "$hook"
+    move_stub="$TEST_TMP/mv-with-link-restore-blocker"
+    cat >"$move_stub" <<STUB
+#!/bin/sh
+previous=
+source=
+destination=
+for argument in "\$@"; do
+    source=\$previous
+    previous=\$argument
+done
+destination=\$previous
+/bin/mv "\$@"
+result=\$?
+case "\$source:\$destination" in
+*.dotfiles-link-*:config)
+if [ -f "$TEST_TMP/link-publish-pre-syscall-reached" ]; then
+    printf 'foreign-link-blocker\n' >"\$source"
+fi
+;;
+esac
+exit "\$result"
+STUB
+    chmod +x "$move_stub"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" DOTFILES_TEST_MOVE_COMMAND="$move_stub" \
+        run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'pre-syscall link substitute was treated as owned' || return 1
+    [[ -f "$TEST_TMP/link-publish-pre-syscall-reached" ]] || fail 'link publish pre-syscall seam was not reached' || return 1
+    substitute_identity="$(<"$TEST_TMP/link-publish-substitute-identity")"
+    [[ -f "$target" && ! -L "$target" && "$(<"$target")" == foreign-link-source ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$target")" == "$substitute_identity" ]] || return 1
+    backup="$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config' -type f -print)"
+    [[ -n "$backup" && "$(<"$backup")" == original ]] || return 1
+    blocker="$(find "$TEST_TMP/home/.config/demo" -name '.dotfiles-link-*' -type f -print)"
+    [[ -n "$blocker" && "$(<"$blocker")" == foreign-link-blocker ]] || return 1
+    report="$(find "$TEST_TMP/state/backups" -name report.tsv -type f -print)"
+    displaced="$(cd "${target%/*}" && /bin/pwd -P)/${target##*/}"
+    expected_row="$(printf 'UNOWNED_DISPLACED\t.config/demo/config\t%s\t%s' "$substitute_identity" "$displaced")"
+    grep -Fqx "$expected_row" "$report" || fail "unowned link displacement was not reported: $(<"$report")" || return 1
+    assert_contains "UNOWNED_DISPLACED .config/demo/config identity=$substitute_identity location=$displaced"
+}
+
 test_install_final_verification_rejects_replaced_report_without_deleting_arrival() {
     local hook report owned
     new_fixture
@@ -1414,8 +1625,72 @@ STUB
     owned="$(find "$TEST_TMP/state/backups" -name report.tsv.owned -type f -print)"
     [[ -n "$report" && "$(<"$report")" == foreign-report ]] || return 1
     [[ -n "$owned" ]] || return 1
-    grep -Fq $'MOVE\t.config/demo/config\t' "$owned" || return 1
+    grep -Fq $'MOVE_INTENT\t.config/demo/config\t' "$owned" || return 1
+    grep -Fq $'MOVE_FINAL\t.config/demo/config\t' "$owned" || return 1
     grep -Fq $'LINK\t.config/demo/config\t' "$owned"
+}
+
+test_install_report_append_handle_does_not_write_foreign_replacement() {
+    local hook report owned intent
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'original\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/replace-report-after-handle-check"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = report_after_handle_check ] && [ "\$2" = MOVE_FINAL ]; then
+    : >"$TEST_TMP/report-handle-replacement-reached"
+    /bin/mv -- "\$3" "\$3.owned"
+    printf 'foreign-report\n' >"\$3"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'post-handle report replacement falsely succeeded' || return 1
+    [[ -f "$TEST_TMP/report-handle-replacement-reached" ]] || fail 'post-handle report replacement hook was not reached' || return 1
+    report="$(find "$TEST_TMP/state/backups" -name report.tsv -type f -print)"
+    owned="$(find "$TEST_TMP/state/backups" -name report.tsv.owned -type f -print)"
+    [[ -n "$report" && "$(<"$report")" == foreign-report ]] || fail 'foreign report was modified through its pathname' || return 1
+    [[ -n "$owned" ]] || return 1
+    intent="$(printf 'MOVE_INTENT\t.config/demo/config\t%s\t%s' \
+        "$TEST_TMP/home/.config/demo/config" "${owned%/report.tsv.owned}/files/.config/demo/config")"
+    grep -Fqx "$intent" "$owned" || fail "prior recovery intent was lost: $(<"$owned")" || return 1
+    grep -Fq $'MOVE_FINAL\t.config/demo/config\t' "$owned" || fail 'final location did not reach the retained report handle' || return 1
+    [[ -f "$TEST_TMP/home/.config/demo/config" && "$(<"$TEST_TMP/home/.config/demo/config")" == original ]]
+}
+
+test_install_partial_report_append_preserves_complete_intent() {
+    local hook report intent line_count
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'original\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/mark-partial-report-write"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = report_partial_write ] && [ "\$2" = MOVE_FINAL ]; then
+    : >"$TEST_TMP/report-partial-write-reached"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" DOTFILES_TEST_REPORT_PARTIAL_TYPE=MOVE_FINAL \
+        run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'partial recovery-report append falsely succeeded' || return 1
+    [[ -f "$TEST_TMP/report-partial-write-reached" ]] || fail 'partial recovery-report seam was not reached' || return 1
+    report="$(find "$TEST_TMP/state/backups" -name report.tsv -type f -print)"
+    [[ -n "$report" ]] || return 1
+    intent="$(printf 'MOVE_INTENT\t.config/demo/config\t%s\t%s' \
+        "$TEST_TMP/home/.config/demo/config" "${report%/report.tsv}/files/.config/demo/config")"
+    grep -Fqx "$intent" "$report" || fail "complete recovery intent was damaged: $(<"$report")" || return 1
+    line_count="$(wc -l <"$report" | tr -d ' ')"
+    [[ "$line_count" -eq 1 ]] || fail "partial append altered prior line boundaries: $(<"$report")" || return 1
+    grep -Fq $'MOVE_FINAL\t.config/demo/config\t' "$report" || fail 'partial final-location evidence was not retained' || return 1
+    [[ -f "$TEST_TMP/home/.config/demo/config" && "$(<"$TEST_TMP/home/.config/demo/config")" == original ]]
 }
 
 test_install_signal_at_final_verification_rolls_back_before_commit() {
@@ -1524,7 +1799,7 @@ STUB
     backup_parent="$(cd "${backup%/*}" && /bin/pwd -P)" || return 1
     actual_backup="$backup_parent/${backup##*/}"
     report="$(find "$TEST_TMP/state.after-backup/backups" -name report.tsv -type f -print)"
-    expected_row="$(printf 'MOVE\t.config/demo/config\t%s\t%s' \
+    expected_row="$(printf 'MOVE_FINAL\t.config/demo/config\t%s\t%s' \
         "$TEST_TMP/home/.config/demo/config" "$actual_backup")"
     grep -Fqx "$expected_row" "$report" || return 1
 }
@@ -1567,10 +1842,11 @@ STUB
 }
 
 test_install_production_ignores_path_and_test_primitive_overrides() {
-    local stub_bin status output
+    local stub_bin status output report
     new_fixture
-    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/stub-bin"
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo" "$TEST_TMP/stub-bin"
     printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'legacy\n' >"$TEST_TMP/home/.config/demo/config"
     write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
     stub_bin="$TEST_TMP/stub-bin"
     cat >"$stub_bin/stat" <<STUB
@@ -1599,7 +1875,8 @@ STUB
         DOTFILES_TEST_TRANSACTION_KERNEL=Linux \
         DOTFILES_TEST_STAT_COMMAND="$stub_bin/override-stat" \
         DOTFILES_TEST_MOVE_COMMAND="$stub_bin/override-mv" \
-        PATH="$stub_bin:/usr/bin:/bin" "$TEST_TMP/repo/bin/dotfiles" install --apply 2>&1)"; then
+        DOTFILES_TEST_REPORT_PARTIAL_TYPE=MOVE_FINAL \
+        PATH="$stub_bin:/usr/bin:/bin" "$TEST_TMP/repo/bin/dotfiles" install --apply --backup 2>&1)"; then
         status=0
     else
         status=$?
@@ -1609,7 +1886,11 @@ STUB
     assert_not_exists "$TEST_TMP/path-stat-ran" || return 1
     assert_not_exists "$TEST_TMP/path-mv-ran" || return 1
     assert_not_exists "$TEST_TMP/override-stat-ran" || return 1
-    assert_not_exists "$TEST_TMP/override-mv-ran"
+    assert_not_exists "$TEST_TMP/override-mv-ran" || return 1
+    report="$(find "$TEST_TMP/state" -name report.tsv -type f -print)"
+    [[ -n "$report" ]] || return 1
+    [[ "$(awk -F '\t' '$1 == "MOVE_INTENT" { count++ } END { print count + 0 }' "$report")" == 1 ]] || return 1
+    [[ "$(awk -F '\t' '$1 == "MOVE_FINAL" { count++ } END { print count + 0 }' "$report")" == 1 ]]
 }
 
 test_install_test_mode_exercises_bsd_and_gnu_primitive_arguments() {
@@ -1747,7 +2028,7 @@ test_install_releases_lock_after_success_and_failure() {
 }
 
 test_install_backup_report_records_move_and_link_rows() {
-    local report expected_move expected_link
+    local report expected_intent expected_final expected_link expected_report
     new_fixture
     mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
     printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
@@ -1758,10 +2039,11 @@ test_install_backup_report_records_move_and_link_rows() {
     assert_status 0 || return 1
     report="$(find "$TEST_TMP/state/backups" -name report.tsv -type f -print)"
     [[ -n "$report" ]] || return 1
-    expected_move=$'MOVE\t.config/demo/config\t'"$TEST_TMP/home/.config/demo/config"$'\t'"${report%/report.tsv}/files/.config/demo/config"
+    expected_intent=$'MOVE_INTENT\t.config/demo/config\t'"$TEST_TMP/home/.config/demo/config"$'\t'"${report%/report.tsv}/files/.config/demo/config"
+    expected_final=$'MOVE_FINAL\t.config/demo/config\t'"$TEST_TMP/home/.config/demo/config"$'\t'"${report%/report.tsv}/files/.config/demo/config"
     expected_link=$'LINK\t.config/demo/config\t'"$TEST_TMP/repo/home/.config/demo/config"$'\t'"$TEST_TMP/home/.config/demo/config"
-    grep -Fqx "$expected_move" "$report" || return 1
-    grep -Fqx "$expected_link" "$report"
+    expected_report="$(printf '%s\n%s\n%s' "$expected_intent" "$expected_final" "$expected_link")"
+    [[ "$(<"$report")" == "$expected_report" ]]
 }
 
 test_install_injected_failure_rolls_back_partial_work() {
@@ -1819,7 +2101,8 @@ test_install_backup_managed_report_tsv_uses_files_namespace() {
     report="${backup%/files/report.tsv}/report.tsv"
     [[ -n "$report" && -n "$backup" && "$report" != "$backup" ]] || return 1
     [[ "$(<"$backup")" == existing ]] || return 1
-    grep -Fq $'MOVE\treport.tsv\t' "$report"
+    grep -Fq $'MOVE_INTENT\treport.tsv\t' "$report" || return 1
+    grep -Fq $'MOVE_FINAL\treport.tsv\t' "$report"
 }
 
 test_install_backup_destination_gap_never_clobbers() {
@@ -2272,7 +2555,7 @@ STUB
     backup_parent="$(cd "${backup%/*}" && /bin/pwd -P)" || return 1
     actual_backup="$backup_parent/${backup##*/}"
     report="$(find "$TEST_TMP/state.pinned/backups" -name report.tsv -type f -print)"
-    expected_row="$(printf 'MOVE\t.config/demo/config\t%s\t%s' \
+    expected_row="$(printf 'MOVE_FINAL\t.config/demo/config\t%s\t%s' \
         "$TEST_TMP/home/.config/demo/config" "$actual_backup")"
     [[ -n "$report" ]] || return 1
     grep -Fqx "$expected_row" "$report" || fail "report did not name actual backup $actual_backup: $(<"$report")" || return 1
@@ -2703,7 +2986,13 @@ run_test test_install_backup_stage_post_move_root_detach_restores_in_recorded_pa
 run_test test_install_backup_stage_post_move_nested_detach_restores_in_recorded_parent
 run_test test_install_backup_stage_replacement_is_not_published_or_deleted
 run_test test_install_backup_source_same_fingerprint_new_inode_is_never_moved
+run_test test_install_backup_target_pre_syscall_swap_restores_unowned_inode
+run_test test_install_backup_target_pre_syscall_swap_reports_unowned_path_unavailable
+run_test test_install_backup_publish_pre_syscall_swap_retains_unowned_inode
+run_test test_install_link_publish_pre_syscall_swap_retains_unowned_inode
 run_test test_install_final_verification_rejects_replaced_report_without_deleting_arrival
+run_test test_install_report_append_handle_does_not_write_foreign_replacement
+run_test test_install_partial_report_append_preserves_complete_intent
 run_test test_install_signal_at_final_verification_rolls_back_before_commit
 run_test test_install_after_link_publish_root_detach_refreshes_owned_location
 run_test test_install_after_backup_stage_nested_detach_refreshes_restore_location

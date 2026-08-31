@@ -29,7 +29,8 @@ INSTALL_ROOT_PHYSICAL=''; INSTALL_ROOT_IDENTITY=''
 PINNED_INSTALL_PATH=(); PINNED_INSTALL_PHYSICAL=(); PINNED_INSTALL_IDENTITY=(); PINNED_INSTALL_COUNT=0
 LOCK_PATH='install.lock'; LOCK_HELD=0
 TRANSACTION_ROOT=''; QUARANTINE_ROOT=''; BACKUP_ROOT=''; BACKUP_FILES=''; REPORT_PATH=''
-REPORT_IDENTITY=''; REPORT_EXPECTED_ROW=(); REPORT_EXPECTED_COUNT=0
+REPORT_IDENTITY=''; REPORT_FD_OPEN=0; REPORT_WRITE_FAILED=0
+REPORT_EXPECTED_ROW=(); REPORT_EXPECTED_COUNT=0
 JOURNAL_TYPE=(); JOURNAL_RELATIVE=(); JOURNAL_FIRST=(); JOURNAL_SECOND=(); JOURNAL_IDENTITY=()
 JOURNAL_ORIGINAL_IDENTITY=()
 JOURNAL_AUX=(); JOURNAL_AUX_RELATIVE=()
@@ -39,11 +40,15 @@ JOURNAL_AUX_IDENTITY=(); JOURNAL_AUX_FINGERPRINT=()
 JOURNAL_PUBLICATION=(); JOURNAL_PUBLICATION_RELATIVE=()
 JOURNAL_PUBLICATION_PARENT_PHYSICAL=(); JOURNAL_PUBLICATION_PARENT_IDENTITY=()
 JOURNAL_PUBLICATION_IDENTITY=(); JOURNAL_PUBLICATION_FINGERPRINT=()
-JOURNAL_REPORT_INDEX=(); JOURNAL_REPORT_SOURCE=(); JOURNAL_PLAN_INDEX=()
+JOURNAL_UNOWNED=(); JOURNAL_UNOWNED_PARENT_PHYSICAL=(); JOURNAL_UNOWNED_PARENT_IDENTITY=()
+JOURNAL_UNOWNED_IDENTITY=(); JOURNAL_UNOWNED_FINGERPRINT=(); JOURNAL_UNOWNED_REPORTED=()
+JOURNAL_REPORT_SOURCE=(); JOURNAL_REPORT_LOCATION=(); JOURNAL_PLAN_INDEX=()
 JOURNAL_COUNT=0; MUTATION_COUNT=0; TEST_FAIL_AFTER=''; PRECOMMIT_CLEANUP_HOOK_RAN=0
 TRANSACTION_ACTIVE=0; CLEANUP_ACTIVE=0; PENDING_SIGNAL=0; TRANSACTION_OWNER_PID=$$
 TRANSACTION_STAT_STYLE=''; TRANSACTION_STAT_COMMAND=''
 TRANSACTION_MOVE_STYLE=''; TRANSACTION_MOVE_COMMAND=''
+MOVE_RESULT_PATH=''; MOVE_RESULT_PARENT_PHYSICAL=''; MOVE_RESULT_PARENT_IDENTITY=''
+MOVE_RESULT_IDENTITY=''; MOVE_RESULT_FINGERPRINT=''
 HYPRLAND_RUNTIME_PROBED=0; HYPRLAND_RUNTIME_STATUS=125; HYPRLAND_RUNTIME_DETAIL=''
 VERSION_APP=(); VERSION_VALUE=(); OBSERVED_VERSION=''
 
@@ -882,12 +887,15 @@ reset_transaction_journal() {
     JOURNAL_PUBLICATION=(); JOURNAL_PUBLICATION_RELATIVE=()
     JOURNAL_PUBLICATION_PARENT_PHYSICAL=(); JOURNAL_PUBLICATION_PARENT_IDENTITY=()
     JOURNAL_PUBLICATION_IDENTITY=(); JOURNAL_PUBLICATION_FINGERPRINT=()
-    JOURNAL_REPORT_INDEX=(); JOURNAL_REPORT_SOURCE=(); JOURNAL_PLAN_INDEX=()
+    JOURNAL_UNOWNED=(); JOURNAL_UNOWNED_PARENT_PHYSICAL=(); JOURNAL_UNOWNED_PARENT_IDENTITY=()
+    JOURNAL_UNOWNED_IDENTITY=(); JOURNAL_UNOWNED_FINGERPRINT=(); JOURNAL_UNOWNED_REPORTED=()
+    JOURNAL_REPORT_SOURCE=(); JOURNAL_REPORT_LOCATION=(); JOURNAL_PLAN_INDEX=()
     JOURNAL_COUNT=0
     MUTATION_COUNT=0
     PENDING_SIGNAL=0
     PRECOMMIT_CLEANUP_HOOK_RAN=0
-    REPORT_PATH=''; REPORT_IDENTITY=''; REPORT_EXPECTED_ROW=(); REPORT_EXPECTED_COUNT=0
+    REPORT_PATH=''; REPORT_IDENTITY=''; REPORT_FD_OPEN=0; REPORT_WRITE_FAILED=0
+    REPORT_EXPECTED_ROW=(); REPORT_EXPECTED_COUNT=0
     TEST_FAIL_AFTER=''
     if [[ ${DOTFILES_TESTING:-0} == 1 ]]; then
         TEST_FAIL_AFTER=${DOTFILES_TEST_FAIL_AFTER:-}
@@ -922,6 +930,37 @@ path_fingerprint() {
     fi
 }
 
+move_artifact_fingerprint() {
+    if [[ -f "$1" || -L "$1" ]]; then
+        path_fingerprint "$1"
+    elif [[ -d "$1" ]]; then
+        printf 'D\n'
+    else
+        return 1
+    fi
+}
+
+capture_move_candidate() (
+    local candidate=$1 expected_identity=$2 expected_fingerprint=$3 parent name
+    local parent_physical parent_identity identity fingerprint
+    [[ -e "$candidate" || -L "$candidate" ]] || return 1
+    identity=$(path_identity "$candidate") || return 1
+    [[ "$identity" == "$expected_identity" ]] || return 1
+    fingerprint=$(move_artifact_fingerprint "$candidate") || return 1
+    [[ "$fingerprint" == "$expected_fingerprint" ]] || return 1
+    parent=${candidate%/*}
+    name=${candidate##*/}
+    [[ "$parent" != "$candidate" ]] || parent=.
+    cd -P -- "$parent" || return 1
+    parent_physical=$(/bin/pwd -P) || return 1
+    parent_identity=$(path_identity .) || return 1
+    identity=$(path_identity "$name") || return 1
+    fingerprint=$(move_artifact_fingerprint "$name") || return 1
+    [[ "$identity" == "$expected_identity" && "$fingerprint" == "$expected_fingerprint" ]] || return 1
+    printf '%s\t%s\t%s\t%s\t%s\n' "$parent_physical/$name" "$parent_physical" \
+        "$parent_identity" "$identity" "$fingerprint"
+)
+
 select_transaction_primitives() {
     local kernel stat_command move_command
     kernel=$(/usr/bin/uname -s 2>/dev/null) || return 74
@@ -954,12 +993,61 @@ select_transaction_primitives() {
 }
 
 move_no_clobber_exact() {
-    [[ $# -eq 2 ]] || return 74
+    local source=$1 destination=$2 operation=${3:-generic} observed_identity observed_fingerprint
+    local command_status info candidate
+    [[ $# -eq 2 || $# -eq 3 ]] || return 74
+    MOVE_RESULT_PATH=''; MOVE_RESULT_PARENT_PHYSICAL=''; MOVE_RESULT_PARENT_IDENTITY=''
+    MOVE_RESULT_IDENTITY=''; MOVE_RESULT_FINGERPRINT=''
+    install_test_hook move_before_syscall "$operation" "$source" "$destination" || return $?
+    observed_identity=$(path_identity "$source") || return 74
+    observed_fingerprint=$(move_artifact_fingerprint "$source") || return 74
+    MOVE_RESULT_IDENTITY=$observed_identity
+    MOVE_RESULT_FINGERPRINT=$observed_fingerprint
+    command_status=0
     case "$TRANSACTION_MOVE_STYLE" in
-        bsd) "$TRANSACTION_MOVE_COMMAND" -h -n -- "$1" "$2" ;;
-        gnu) "$TRANSACTION_MOVE_COMMAND" -n -T -- "$1" "$2" ;;
+        bsd) "$TRANSACTION_MOVE_COMMAND" -h -n -- "$source" "$destination" || command_status=$? ;;
+        gnu) "$TRANSACTION_MOVE_COMMAND" -n -T -- "$source" "$destination" || command_status=$? ;;
         *) return 74 ;;
     esac
+    [[ $command_status -eq 0 ]] || return "$command_status"
+    for candidate in "$destination" "$destination/${source##*/}" "$source"; do
+        info=$(capture_move_candidate "$candidate" "$observed_identity" "$observed_fingerprint") || info=''
+        [[ -n "$info" ]] || continue
+        IFS=$'\t' read -r MOVE_RESULT_PATH MOVE_RESULT_PARENT_PHYSICAL MOVE_RESULT_PARENT_IDENTITY \
+            MOVE_RESULT_IDENTITY MOVE_RESULT_FINGERPRINT <<<"$info"
+        return 0
+    done
+    return 0
+}
+
+recover_unowned_displaced() {
+    local original_path=$1 saved_path=$MOVE_RESULT_PATH saved_parent=$MOVE_RESULT_PARENT_PHYSICAL
+    local saved_parent_identity=$MOVE_RESULT_PARENT_IDENTITY saved_identity=$MOVE_RESULT_IDENTITY
+    local saved_fingerprint=$MOVE_RESULT_FINGERPRINT info
+    [[ -n "$saved_identity" && -n "$saved_fingerprint" ]] || return 74
+    if [[ -z "$saved_path" ]]; then
+        printf 'UNOWNED_DISPLACED\t-\t-\t-\t%s\t%s\n' "$saved_identity" "$saved_fingerprint"
+        return 0
+    fi
+    if [[ ! -e "$original_path" && ! -L "$original_path" ]]; then
+        move_no_clobber_exact "$saved_path" "$original_path" unowned_restore || true
+        if [[ "$MOVE_RESULT_IDENTITY" == "$saved_identity" && \
+            "$MOVE_RESULT_FINGERPRINT" == "$saved_fingerprint" && \
+            "$MOVE_RESULT_PATH" != "$saved_path" ]]; then
+            printf 'UNOWNED_RESTORED\t%s\t%s\t%s\t%s\t%s\n' "$MOVE_RESULT_PATH" \
+                "$MOVE_RESULT_PARENT_PHYSICAL" "$MOVE_RESULT_PARENT_IDENTITY" \
+                "$saved_identity" "$saved_fingerprint"
+            return 0
+        fi
+    fi
+    info=$(capture_move_candidate "$saved_path" "$saved_identity" "$saved_fingerprint") || info=''
+    if [[ -n "$info" ]]; then
+        IFS=$'\t' read -r saved_path saved_parent saved_parent_identity saved_identity saved_fingerprint <<<"$info"
+        printf 'UNOWNED_DISPLACED\t%s\t%s\t%s\t%s\t%s\n' "$saved_path" "$saved_parent" \
+            "$saved_parent_identity" "$saved_identity" "$saved_fingerprint"
+    else
+        printf 'UNOWNED_DISPLACED\t-\t-\t-\t%s\t%s\n' "$saved_identity" "$saved_fingerprint"
+    fi
 }
 
 pin_state_root() {
@@ -1052,7 +1140,7 @@ begin_transaction_storage() {
 }
 
 begin_backup() {
-    local timestamp
+    local timestamp noclobber_was_set=0 open_status=0
     state_cwd_matches_pin && state_name_matches_pin || return 74
     timestamp=$(date -u +%Y%m%dT%H%M%SZ) || return 74
     mkdir -p -- backups || return 74
@@ -1061,45 +1149,55 @@ begin_backup() {
     BACKUP_FILES="$BACKUP_ROOT/files"
     mkdir -- "$BACKUP_FILES" || return 74
     REPORT_PATH="$BACKUP_ROOT/report.tsv"
-    : >"$REPORT_PATH" || return 74
+    [[ -o noclobber ]] && noclobber_was_set=1
+    set -C
+    exec 9>"$REPORT_PATH" || open_status=$?
+    [[ $noclobber_was_set -eq 1 ]] || set +C
+    [[ $open_status -eq 0 ]] || return 74
+    REPORT_FD_OPEN=1
     [[ -f "$REPORT_PATH" && ! -L "$REPORT_PATH" ]] || return 74
     REPORT_IDENTITY=$(path_identity "$REPORT_PATH") || return 74
     [[ -n "$REPORT_IDENTITY" ]] || return 74
     honor_pending_signal || return $?
 }
 
-append_report() {
-    local row identity
-    [[ -n "$REPORT_PATH" ]] || return 0
-    state_cwd_matches_pin || return 74
-    [[ -f "$REPORT_PATH" && ! -L "$REPORT_PATH" ]] || return 74
-    identity=$(path_identity "$REPORT_PATH") || return 74
-    [[ "$identity" == "$REPORT_IDENTITY" ]] || return 74
-    row=$(printf '%s\t%s\t%s\t%s' "$1" "$2" "$3" "$4") || return 74
-    printf '%s\n' "$row" >>"$REPORT_PATH" || return 74
-    identity=$(path_identity "$REPORT_PATH") || return 74
-    [[ "$identity" == "$REPORT_IDENTITY" ]] || return 74
-    REPORT_EXPECTED_ROW[$REPORT_EXPECTED_COUNT]=$row
-    REPORT_EXPECTED_COUNT=$((REPORT_EXPECTED_COUNT + 1))
+close_report_handle() {
+    [[ "$REPORT_FD_OPEN" == 1 ]] || return 0
+    exec 9>&- || return 74
+    REPORT_FD_OPEN=0
 }
 
-replace_report_row() {
-    local index=$1 row identity previous
-    shift
-    [[ -n "$REPORT_PATH" && $index -ge 0 && $index -lt $REPORT_EXPECTED_COUNT ]] || return 74
+report_path_matches_pin() {
+    local identity
+    [[ -n "$REPORT_PATH" && -f "$REPORT_PATH" && ! -L "$REPORT_PATH" ]] || return 1
+    identity=$(path_identity "$REPORT_PATH") || return 1
+    [[ "$identity" == "$REPORT_IDENTITY" ]]
+}
+
+append_report() {
+    local record_type=$1 row partial_length partial
+    [[ -n "$REPORT_PATH" ]] || return 0
+    [[ "$REPORT_FD_OPEN" == 1 && "$REPORT_WRITE_FAILED" == 0 ]] || return 74
     state_cwd_matches_pin || return 74
-    [[ -f "$REPORT_PATH" && ! -L "$REPORT_PATH" ]] || return 74
-    identity=$(path_identity "$REPORT_PATH") || return 74
-    [[ "$identity" == "$REPORT_IDENTITY" ]] || return 74
+    report_path_matches_pin || return 74
     row=$(printf '%s\t%s\t%s\t%s' "$1" "$2" "$3" "$4") || return 74
-    previous=${REPORT_EXPECTED_ROW[$index]}
-    REPORT_EXPECTED_ROW[$index]=$row
-    if ! expected_report_content >"$REPORT_PATH"; then
-        REPORT_EXPECTED_ROW[$index]=$previous
+    install_test_hook report_after_handle_check "$record_type" "$REPORT_PATH" || return $?
+    if [[ ${DOTFILES_TESTING:-0} == 1 && ${DOTFILES_TEST_REPORT_PARTIAL_TYPE:-} == "$record_type" ]]; then
+        partial_length=$((${#row} / 2))
+        [[ $partial_length -gt 0 ]] || partial_length=1
+        partial=${row:0:$partial_length}
+        printf '%s' "$partial" >&9 || true
+        REPORT_WRITE_FAILED=1
+        install_test_hook report_partial_write "$record_type" "$REPORT_PATH" || true
         return 74
     fi
-    identity=$(path_identity "$REPORT_PATH") || return 74
-    [[ "$identity" == "$REPORT_IDENTITY" ]] || return 74
+    if ! printf '%s\n' "$row" >&9; then
+        REPORT_WRITE_FAILED=1
+        return 74
+    fi
+    REPORT_EXPECTED_ROW[$REPORT_EXPECTED_COUNT]=$row
+    REPORT_EXPECTED_COUNT=$((REPORT_EXPECTED_COUNT + 1))
+    report_path_matches_pin || return 74
 }
 
 expected_report_content() {
@@ -1112,6 +1210,7 @@ expected_report_content() {
 verify_report_postcondition() {
     local identity expected_checksum actual_checksum line i=0
     [[ -n "$REPORT_PATH" ]] || return 0
+    [[ "$REPORT_FD_OPEN" == 1 && "$REPORT_WRITE_FAILED" == 0 ]] || return 74
     state_cwd_matches_pin || return 74
     [[ -f "$REPORT_PATH" && ! -L "$REPORT_PATH" ]] || {
         printf '%s: backup report is not the pinned regular file\n' "$PROGRAM" >&2; return 74;
@@ -1157,11 +1256,17 @@ journal_move() {
     JOURNAL_PUBLICATION_PARENT_IDENTITY[$i]=''
     JOURNAL_PUBLICATION_IDENTITY[$i]=''
     JOURNAL_PUBLICATION_FINGERPRINT[$i]=''
-    JOURNAL_REPORT_INDEX[$i]=$REPORT_EXPECTED_COUNT
+    JOURNAL_UNOWNED[$i]=''
+    JOURNAL_UNOWNED_PARENT_PHYSICAL[$i]=''
+    JOURNAL_UNOWNED_PARENT_IDENTITY[$i]=''
+    JOURNAL_UNOWNED_IDENTITY[$i]=''
+    JOURNAL_UNOWNED_FINGERPRINT[$i]=''
+    JOURNAL_UNOWNED_REPORTED[$i]=''
     JOURNAL_REPORT_SOURCE[$i]=$target_path
+    JOURNAL_REPORT_LOCATION[$i]=''
     JOURNAL_PLAN_INDEX[$i]=$plan_index
     JOURNAL_COUNT=$((JOURNAL_COUNT + 1))
-    append_report MOVE "$relative_path" "$target_path" "$STATE_ROOT_PHYSICAL/$backup_path"
+    append_report MOVE_INTENT "$relative_path" "$target_path" "$STATE_ROOT_PHYSICAL/$backup_path"
 }
 
 journal_link() {
@@ -1187,8 +1292,14 @@ journal_link() {
     JOURNAL_PUBLICATION_PARENT_IDENTITY[$i]=''
     JOURNAL_PUBLICATION_IDENTITY[$i]=''
     JOURNAL_PUBLICATION_FINGERPRINT[$i]=''
-    JOURNAL_REPORT_INDEX[$i]=$REPORT_EXPECTED_COUNT
+    JOURNAL_UNOWNED[$i]=''
+    JOURNAL_UNOWNED_PARENT_PHYSICAL[$i]=''
+    JOURNAL_UNOWNED_PARENT_IDENTITY[$i]=''
+    JOURNAL_UNOWNED_IDENTITY[$i]=''
+    JOURNAL_UNOWNED_FINGERPRINT[$i]=''
+    JOURNAL_UNOWNED_REPORTED[$i]=''
     JOURNAL_REPORT_SOURCE[$i]=$source
+    JOURNAL_REPORT_LOCATION[$i]=''
     JOURNAL_PLAN_INDEX[$i]=$plan_index
     JOURNAL_COUNT=$((JOURNAL_COUNT + 1))
     append_report LINK "$relative_path" "$source" "$target_path"
@@ -1197,8 +1308,47 @@ journal_link() {
 finalize_move_report() {
     local journal_index=$1 actual_backup_path=$2
     [[ "${JOURNAL_TYPE[$journal_index]}" == MOVE ]] || return 74
-    replace_report_row "${JOURNAL_REPORT_INDEX[$journal_index]}" MOVE "${JOURNAL_RELATIVE[$journal_index]}" \
-        "${JOURNAL_REPORT_SOURCE[$journal_index]}" "$actual_backup_path"
+    [[ "${JOURNAL_REPORT_LOCATION[$journal_index]}" == "$actual_backup_path" ]] && return 0
+    append_report MOVE_FINAL "${JOURNAL_RELATIVE[$journal_index]}" \
+        "${JOURNAL_REPORT_SOURCE[$journal_index]}" "$actual_backup_path" || return $?
+    JOURNAL_REPORT_LOCATION[$journal_index]=$actual_backup_path
+}
+
+report_unowned_location() {
+    local journal_index=$1 location=$2 identity=${JOURNAL_UNOWNED_IDENTITY[$1]}
+    [[ "${JOURNAL_UNOWNED_REPORTED[$journal_index]}" == "$location" ]] && return 0
+    append_report UNOWNED_DISPLACED "${JOURNAL_RELATIVE[$journal_index]}" "$identity" "$location" || return $?
+    JOURNAL_UNOWNED_REPORTED[$journal_index]=$location
+}
+
+record_unowned_move() {
+    local journal_index=$1 kind=$2 path=$3 parent_physical=$4 parent_identity=$5 identity=$6 fingerprint=$7
+    case "$kind" in
+        UNOWNED_RESTORED)
+            printf '%s: UNOWNED_RESTORED %s identity=%s location=%s\n' "$PROGRAM" \
+                "${JOURNAL_RELATIVE[$journal_index]}" "$identity" "$path" >&2
+            ;;
+        UNOWNED_DISPLACED)
+            JOURNAL_UNOWNED_IDENTITY[$journal_index]=$identity
+            JOURNAL_UNOWNED_FINGERPRINT[$journal_index]=$fingerprint
+            if [[ "$path" == - ]]; then
+                JOURNAL_UNOWNED[$journal_index]=''
+                JOURNAL_UNOWNED_PARENT_PHYSICAL[$journal_index]=''
+                JOURNAL_UNOWNED_PARENT_IDENTITY[$journal_index]=''
+                report_unowned_location "$journal_index" "UNAVAILABLE identity=$identity" || return $?
+                printf '%s: UNOWNED_DISPLACED %s identity=%s recovery-path-unavailable\n' "$PROGRAM" \
+                    "${JOURNAL_RELATIVE[$journal_index]}" "$identity" >&2
+            else
+                JOURNAL_UNOWNED[$journal_index]=$path
+                JOURNAL_UNOWNED_PARENT_PHYSICAL[$journal_index]=$parent_physical
+                JOURNAL_UNOWNED_PARENT_IDENTITY[$journal_index]=$parent_identity
+                report_unowned_location "$journal_index" "$path" || return $?
+                printf '%s: UNOWNED_DISPLACED %s identity=%s location=%s\n' "$PROGRAM" \
+                    "${JOURNAL_RELATIVE[$journal_index]}" "$identity" "$path" >&2
+            fi
+            ;;
+        *) return 74 ;;
+    esac
 }
 
 set_journal_link_identity() {
@@ -1337,7 +1487,7 @@ path_with_replaced_prefix() {
 
 refresh_journal_locations_after_hook() {
     local previous_state_physical=$1 i info actual actual_parent actual_parent_identity actual_name
-    local publication_path aux_path expected_name status=0
+    local publication_path aux_path unowned_path expected_name status=0
     refresh_state_physical_from_cwd || return 74
     for ((i=0; i<JOURNAL_COUNT; i++)); do
         publication_path=${JOURNAL_PUBLICATION[$i]}
@@ -1353,6 +1503,13 @@ refresh_journal_locations_after_hook() {
             JOURNAL_AUX[$i]=$aux_path
             JOURNAL_AUX_PARENT_PHYSICAL[$i]=$(path_with_replaced_prefix "${JOURNAL_AUX_PARENT_PHYSICAL[$i]}" \
                 "$previous_state_physical" "$STATE_ROOT_PHYSICAL") || return 74
+        fi
+        unowned_path=${JOURNAL_UNOWNED[$i]}
+        if [[ -n "$unowned_path" ]]; then
+            unowned_path=$(path_with_replaced_prefix "$unowned_path" "$previous_state_physical" "$STATE_ROOT_PHYSICAL") || return 74
+            JOURNAL_UNOWNED[$i]=$unowned_path
+            JOURNAL_UNOWNED_PARENT_PHYSICAL[$i]=$(path_with_replaced_prefix \
+                "${JOURNAL_UNOWNED_PARENT_PHYSICAL[$i]}" "$previous_state_physical" "$STATE_ROOT_PHYSICAL") || return 74
         fi
 
         if [[ -n "${JOURNAL_PUBLICATION_IDENTITY[$i]}" ]]; then
@@ -1388,6 +1545,25 @@ refresh_journal_locations_after_hook() {
                 JOURNAL_AUX_PARENT_IDENTITY[$i]=$actual_parent_identity
             else
                 mark_journal_aux_unavailable "$i"
+                status=74
+            fi
+        fi
+
+        if [[ -n "${JOURNAL_UNOWNED_IDENTITY[$i]}" && -n "${JOURNAL_UNOWNED[$i]}" ]]; then
+            info=$(locate_recorded_artifact "${JOURNAL_UNOWNED[$i]}" \
+                "${JOURNAL_UNOWNED_PARENT_PHYSICAL[$i]}" "${JOURNAL_UNOWNED_PARENT_IDENTITY[$i]}" \
+                "${JOURNAL_UNOWNED_IDENTITY[$i]}" "${JOURNAL_UNOWNED_FINGERPRINT[$i]}") || info=''
+            if [[ -n "$info" ]]; then
+                IFS=$'\t' read -r actual actual_parent actual_parent_identity actual_name <<<"$info"
+                JOURNAL_UNOWNED[$i]=$actual
+                JOURNAL_UNOWNED_PARENT_PHYSICAL[$i]=$actual_parent
+                JOURNAL_UNOWNED_PARENT_IDENTITY[$i]=$actual_parent_identity
+                report_unowned_location "$i" "$actual" || return $?
+            else
+                JOURNAL_UNOWNED[$i]=''
+                JOURNAL_UNOWNED_PARENT_PHYSICAL[$i]=''
+                JOURNAL_UNOWNED_PARENT_IDENTITY[$i]=''
+                report_unowned_location "$i" "UNAVAILABLE identity=${JOURNAL_UNOWNED_IDENTITY[$i]}" || return $?
                 status=74
             fi
         fi
@@ -1561,6 +1737,7 @@ stage_backup_target() (
     local target_name stage_name recovery_name observed nested recovery_nested actual actual_name stage_status
     local artifact_identity artifact_fingerprint immediate_parent_physical immediate_parent_identity
     local current_parent_physical current_parent_identity restore_parent_physical restore_parent_identity hook_status=0
+    local unowned_info
     arm_subshell_signal_forwarding
     pin_apply_target_parent "$source" "$target_path" "$relative_path" 0 "$expected_parent_physical" "$expected_parent_identity" || return $?
     observed=$(artifact_status "$source" "$target_path")
@@ -1575,7 +1752,13 @@ stage_backup_target() (
     publication_parent_matches_pin "$target_path" "$expected_parent_physical" "$expected_parent_identity" || return 65
     [[ "$(path_identity "$target_name" 2>/dev/null || true)" == "$expected_target_identity" ]] || return 65
     [[ "$(path_fingerprint "$target_name" 2>/dev/null || true)" == "$expected_fingerprint" ]] || return 65
-    move_no_clobber_exact "$target_name" "$stage_name" || return 74
+    move_no_clobber_exact "$target_name" "$stage_name" backup_target_stage || return 74
+    if [[ "$MOVE_RESULT_IDENTITY" != "$expected_target_identity" || \
+        "$MOVE_RESULT_FINGERPRINT" != "$expected_fingerprint" ]]; then
+        unowned_info=$(recover_unowned_displaced "$target_name") || return 74
+        printf '%s\n' "$unowned_info"
+        return 74
+    fi
     actual=''
     stage_status=0
     if [[ "$(path_identity "$stage_name" 2>/dev/null || true)" == "$expected_target_identity" && \
@@ -1622,7 +1805,7 @@ stage_backup_target() (
         restore_parent_physical=$expected_parent_physical
         restore_parent_identity=$expected_parent_identity
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$actual" "$current_parent_physical" "$current_parent_identity" \
+    printf 'OWNED\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$actual" "$current_parent_physical" "$current_parent_identity" \
         "$artifact_identity" "$artifact_fingerprint" "$restore_parent_physical" "$restore_parent_identity"
     [[ $hook_status -eq 0 ]] || return "$hook_status"
     [[ "$current_parent_physical" == "$immediate_parent_physical" && \
@@ -1641,7 +1824,7 @@ move_staged_backup() (
     local target_path=$1 stage_path=$2 backup_path=$3 expected_fingerprint=$4 expected_stage_identity=$5
     local stage_name backup_name container_path root_physical stage_identity actual actual_name
     local artifact_identity artifact_fingerprint immediate_parent_physical immediate_parent_identity
-    local current_parent_physical current_parent_identity status=0 hook_status=0
+    local current_parent_physical current_parent_identity status=0 hook_status=0 unowned_info
     arm_subshell_signal_forwarding
     stage_name=${stage_path##*/}
     state_cwd_matches_pin || return 74
@@ -1653,7 +1836,13 @@ move_staged_backup() (
     cd -P -- "${backup_path%/*}" || return 74
     path_within "$(/bin/pwd -P)" "$root_physical" || return 74
     backup_name=${backup_path##*/}
-    move_no_clobber_exact "$stage_path" "$backup_name" || return 74
+    move_no_clobber_exact "$stage_path" "$backup_name" backup_stage_publish || return 74
+    if [[ "$MOVE_RESULT_IDENTITY" != "$expected_stage_identity" || \
+        "$MOVE_RESULT_FINGERPRINT" != "$expected_fingerprint" ]]; then
+        unowned_info=$(recover_unowned_displaced "$stage_path") || return 74
+        printf '%s\n' "$unowned_info"
+        return 74
+    fi
     actual=''
     if [[ ( -f "$backup_name" || -L "$backup_name" ) && \
         "$(path_identity "$backup_name" 2>/dev/null || true)" == "$stage_identity" ]]; then
@@ -1683,7 +1872,7 @@ move_staged_backup() (
     current_parent_physical=$(/bin/pwd -P 2>/dev/null) || current_parent_physical=$immediate_parent_physical
     current_parent_identity=$(path_identity . 2>/dev/null) || current_parent_identity=$immediate_parent_identity
     actual="$current_parent_physical/$actual_name"
-    printf '%s\t%s\t%s\t%s\t%s\n' "$actual" "$current_parent_physical" "$current_parent_identity" \
+    printf 'OWNED\t%s\t%s\t%s\t%s\t%s\n' "$actual" "$current_parent_physical" "$current_parent_identity" \
         "$artifact_identity" "$artifact_fingerprint"
     [[ $hook_status -eq 0 ]] || return "$hook_status"
     [[ "$current_parent_physical" == "$immediate_parent_physical" && \
@@ -1719,7 +1908,7 @@ publish_link_temp() (
     local expected_parent_physical=$7 expected_parent_identity=$8
     local target_name temp_name container_path actual actual_name artifact_identity artifact_fingerprint
     local immediate_parent_physical immediate_parent_identity current_parent_physical current_parent_identity
-    local status hook_status=0 temp_location temp_actual temp_parent temp_parent_identity temp_actual_name
+    local status hook_status=0 temp_location temp_actual temp_parent temp_parent_identity temp_actual_name unowned_info
     arm_subshell_signal_forwarding
     pin_apply_target_parent "$source" "$target_path" "$relative_path" 0 "$expected_parent_physical" "$expected_parent_identity" || return $?
     target_name=${relative_path##*/}
@@ -1750,7 +1939,13 @@ publish_link_temp() (
             "$expected_identity" "L:$source"
         return 65
     }
-    move_no_clobber_exact "$temp_name" "$target_name" || return 74
+    move_no_clobber_exact "$temp_name" "$target_name" link_publish || return 74
+    if [[ "$MOVE_RESULT_IDENTITY" != "$expected_identity" || \
+        "$MOVE_RESULT_FINGERPRINT" != "L:$source" ]]; then
+        unowned_info=$(recover_unowned_displaced "$temp_name") || return 74
+        printf '%s\n' "$unowned_info"
+        return 74
+    fi
     actual=''
     status=0
     if [[ -d "$target_name" && ! -L "$target_name" ]]; then
@@ -1794,8 +1989,8 @@ publish_link_temp() (
 apply_install_entry() {
     local plan_index=$1 action=$2 source=$3 target_path=$4 relative_path=$5
     local fingerprint backup_path='' backup_stage='' backup_recovery='' stage_relative actual_stage stage_status
-    local stage_info stage_identity stage_fingerprint restore_parent_physical restore_parent_identity
-    local backup_info backup_status backup_identity backup_fingerprint
+    local stage_info stage_kind stage_identity stage_fingerprint restore_parent_physical restore_parent_identity
+    local backup_info backup_kind backup_status backup_identity backup_fingerprint
     local temp_path temp_relative link_recovery identity journal_index published_path publish_status actual_relative
     local inspection target_identity parent_physical parent_identity actual_parent actual_parent_identity published_info
     local published_kind published_identity published_fingerprint
@@ -1825,15 +2020,24 @@ apply_install_entry() {
         stage_info=$(stage_backup_target "$source" "$target_path" "$relative_path" "$backup_stage" "$backup_recovery" \
             "$fingerprint" "$target_identity" "$parent_physical" "$parent_identity")
         stage_status=$?
-        IFS=$'\t' read -r actual_stage actual_parent actual_parent_identity stage_identity stage_fingerprint \
+        IFS=$'\t' read -r stage_kind actual_stage actual_parent actual_parent_identity stage_identity stage_fingerprint \
             restore_parent_physical restore_parent_identity <<<"$stage_info"
-        if [[ -n "$actual_stage" ]]; then
+        if [[ "$stage_kind" == UNOWNED_RESTORED || "$stage_kind" == UNOWNED_DISPLACED ]]; then
+            record_unowned_move "$journal_index" "$stage_kind" "$actual_stage" "$actual_parent" \
+                "$actual_parent_identity" "$stage_identity" "$stage_fingerprint" || return $?
+            previous_state_physical=$STATE_ROOT_PHYSICAL
+            refresh_journal_locations_after_hook "$previous_state_physical" || true
+            honor_pending_signal || return $?
+            return "$stage_status"
+        fi
+        [[ "$stage_kind" == OWNED || -z "$stage_kind" ]] || return 74
+        if [[ "$stage_kind" == OWNED && -n "$actual_stage" ]]; then
             actual_relative=$relative_path
             set_journal_aux_location "$journal_index" "$actual_stage" "$actual_relative" "$actual_parent" \
                 "$actual_parent_identity" "$stage_identity" "$stage_fingerprint" \
                 "$restore_parent_physical" "$restore_parent_identity"
         fi
-        if [[ -n "$actual_stage" ]]; then
+        if [[ "$stage_kind" == OWNED && -n "$actual_stage" ]]; then
             previous_state_physical=$STATE_ROOT_PHYSICAL
             hook_info=$(run_artifact_hook_with_refresh after_backup_stage "$actual_stage" "$actual_parent" \
                 "$actual_parent_identity" "$stage_identity" "$stage_fingerprint" "$target_path" "$actual_stage")
@@ -1868,10 +2072,23 @@ apply_install_entry() {
         run_journal_aux_hook_boundary "$journal_index" backup_move_after_state_check "$STATE_ROOT" "$backup_display" || return $?
         actual_stage=${JOURNAL_AUX[$journal_index]}
         [[ -n "$actual_stage" ]] || return 74
+        previous_state_physical=$STATE_ROOT_PHYSICAL
         backup_info=$(move_staged_backup "$target_path" "$actual_stage" "$backup_path" "$fingerprint" "$stage_identity")
         backup_status=$?
-        IFS=$'\t' read -r published_path actual_parent actual_parent_identity backup_identity backup_fingerprint <<<"$backup_info"
-        if [[ -n "$published_path" ]]; then
+        IFS=$'\t' read -r backup_kind published_path actual_parent actual_parent_identity backup_identity backup_fingerprint \
+            <<<"$backup_info"
+        if [[ "$backup_kind" == UNOWNED_RESTORED || "$backup_kind" == UNOWNED_DISPLACED ]]; then
+            record_unowned_move "$journal_index" "$backup_kind" "$published_path" "$actual_parent" \
+                "$actual_parent_identity" "$backup_identity" "$backup_fingerprint" || return $?
+            refresh_status=0
+            refresh_journal_locations_after_hook "$previous_state_physical" || refresh_status=$?
+            honor_pending_signal || return $?
+            [[ $backup_status -ne 0 ]] && return "$backup_status"
+            [[ $refresh_status -eq 0 ]] || return "$refresh_status"
+            return 74
+        fi
+        [[ "$backup_kind" == OWNED || -z "$backup_kind" ]] || return 74
+        if [[ "$backup_kind" == OWNED && -n "$published_path" ]]; then
             actual_relative=$relative_path
             set_journal_publication_location "$journal_index" "$published_path" "$actual_relative" "$actual_parent" \
                 "$actual_parent_identity" "$backup_identity" "$backup_fingerprint"
@@ -1957,6 +2174,10 @@ apply_install_entry() {
             set_journal_aux_location "$journal_index" "$temp_path" "$temp_relative" "$actual_parent" \
                 "$actual_parent_identity" "$published_identity" "$published_fingerprint" \
                 "$parent_physical" "$parent_identity"
+            ;;
+        UNOWNED_RESTORED|UNOWNED_DISPLACED)
+            record_unowned_move "$journal_index" "$published_kind" "$published_path" "$actual_parent" \
+                "$actual_parent_identity" "$published_identity" "$published_fingerprint" || return $?
             ;;
     esac
     refresh_status=0
@@ -2306,7 +2527,11 @@ rollback_transaction() {
                 recovery_identity=${JOURNAL_AUX_IDENTITY[$i]}
                 recovery_path=${JOURNAL_AUX[$i]}
             else
-                recovery_identity=${JOURNAL_IDENTITY[$i]}
+                if [[ "${JOURNAL_TYPE[$i]}" == MOVE ]]; then
+                    recovery_identity=${JOURNAL_ORIGINAL_IDENTITY[$i]}
+                else
+                    recovery_identity=${JOURNAL_IDENTITY[$i]}
+                fi
                 recovery_path=''
             fi
             if [[ -n "$recovery_path" ]]; then
@@ -2356,6 +2581,7 @@ transaction_trap() {
         rollback_transaction || true
     fi
     TRANSACTION_ACTIVE=0
+    close_report_handle || true
     cleanup_transaction_storage
     release_lock || true
     [[ -n "$TRANSACTION_START_DIR" ]] && cd -P -- "$TRANSACTION_START_DIR" 2>/dev/null || true
@@ -2409,6 +2635,7 @@ commit_transaction() {
 finish_transaction() {
     local status=0
     [[ "$TRANSACTION_ACTIVE" == 0 ]] || return 74
+    close_report_handle || status=$?
     cleanup_success_transaction_storage || status=$?
     release_lock || status=$?
     cd -P -- "$TRANSACTION_START_DIR" || { [[ $status -ne 0 ]] || status=65; }

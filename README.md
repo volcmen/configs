@@ -132,12 +132,15 @@ ${XDG_STATE_HOME:-$HOME/.local/state}/dotfiles/backups/<UTC timestamp>-<pid>/
 ```
 
 Each set contains `files/`, preserving paths relative to `$HOME`, and a
-tab-separated `report.tsv`. `MOVE` rows record the relative path, original live
-target, and identity-validated physical backup path. If that path can no longer
-be revalidated, the row records its identity as unavailable instead of naming a
-stale path. `LINK` rows record the relative path, canonical source, and installed
-target. An unexpected failure during the same transaction triggers automatic
-rollback; a completed install is recovered manually from its backup set.
+tab-separated, append-only `report.tsv`. A `MOVE_INTENT` row is durable before
+the live target moves. `MOVE_FINAL` rows then record identity-validated physical
+backup locations; the last complete row for an intent is current. If a location
+can no longer be revalidated, the next row records its identity as unavailable
+instead of naming a stale path. `UNOWNED_DISPLACED` records an unexpected inode
+that the system move selected but could not safely return to its source name.
+`LINK` rows record the relative path, canonical source, and installed target. An
+unexpected failure during the same transaction triggers automatic rollback; a
+completed install is recovered manually from its backup set.
 
 Before an apply mutates state, it pins the physical identity of the effective
 home and every existing publication ancestor. It uses the physical host's
@@ -153,10 +156,16 @@ the recorded physical parent and artifact identity, preserves foreign
 arrivals, and reports the last identity-validated recovery location rather
 than deleting without proof.
 
+The report is created without clobbering and retained by an open file handle for
+the whole transaction. Location updates append records through that handle; they
+never reopen or truncate the report pathname. A failed or partial append leaves
+all earlier complete recovery records intact and makes the transaction fail.
+
 For manual recovery:
 
 1. Stop using the affected application and inspect `report.tsv`.
-2. For each `MOVE` row, verify that the current target is still the symlink
+2. For each `MOVE_INTENT`, use its last complete `MOVE_FINAL` row and verify that
+   the current target is still the symlink
    recorded by its matching `LINK` row. If it changed after installation, stop
    instead of overwriting it.
 3. Remove only that verified installed symlink, then move the corresponding
