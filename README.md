@@ -177,7 +177,8 @@ destination identities are compared with all post-call candidates. The original
 source identity is located first, which distinguishes a moved outer directory
 from a no-op source that remains in place. A no-op is valid only when that
 source remains and no candidate changed; a changed destination with a restored
-source is ambiguous and left untouched. If the original identity is absent,
+source is ambiguous and left untouched, with no transaction-owned move to
+roll back. If the original identity is absent,
 only a single newly changed candidate can be treated as unowned; multiple
 plausible candidates are recorded as ambiguous and left untouched. Unexpected
 regular files, symlinks, and directories are restored no-clobber when possible;

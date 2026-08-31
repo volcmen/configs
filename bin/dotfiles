@@ -1496,6 +1496,18 @@ journal_move() {
     append_report MOVE_INTENT "$relative_path" "$target_path" "$STATE_ROOT_PHYSICAL/$backup_path"
 }
 
+cancel_journal_move() {
+    local journal_index=$1
+    [[ "${JOURNAL_TYPE[$journal_index]}" == MOVE ]] || return 74
+    JOURNAL_TYPE[$journal_index]=CANCELLED
+    JOURNAL_AUX[$journal_index]=''
+    JOURNAL_AUX_RELATIVE[$journal_index]=''
+    JOURNAL_AUX_PARENT_PHYSICAL[$journal_index]=''
+    JOURNAL_AUX_PARENT_IDENTITY[$journal_index]=''
+    JOURNAL_AUX_IDENTITY[$journal_index]=''
+    JOURNAL_AUX_FINGERPRINT[$journal_index]=''
+}
+
 journal_link() {
     local plan_index=$1 relative_path=$2 source=$3 target_path=$4 temp_path=$5 temp_relative=$6
     local parent_physical=$7 parent_identity=$8 i=$JOURNAL_COUNT
@@ -1992,7 +2004,14 @@ stage_backup_target() (
     publication_parent_matches_pin "$target_path" "$expected_parent_physical" "$expected_parent_identity" || return 65
     [[ "$(path_identity "$target_name" 2>/dev/null || true)" == "$expected_target_identity" ]] || return 65
     [[ "$(path_fingerprint "$target_name" 2>/dev/null || true)" == "$expected_fingerprint" ]] || return 65
-    move_no_clobber_exact "$target_name" "$stage_name" backup_target_stage || return 74
+    move_no_clobber_exact "$target_name" "$stage_name" backup_target_stage || {
+        if [[ "$MOVE_RESULT_AMBIGUOUS" == 1 && \
+            "$(path_identity "$target_name" 2>/dev/null || true)" == "$expected_target_identity" && \
+            "$(path_fingerprint "$target_name" 2>/dev/null || true)" == "$expected_fingerprint" ]]; then
+            printf 'CANCELLED\n'
+        fi
+        return 74
+    }
     if [[ "$MOVE_RESULT_IDENTITY" != "$expected_target_identity" || \
         "$MOVE_RESULT_FINGERPRINT" != "$expected_fingerprint" ]]; then
         unowned_info=$(recover_unowned_displaced "$target_name") || return 74
@@ -2262,6 +2281,10 @@ apply_install_entry() {
         stage_status=$?
         IFS=$'\t' read -r stage_kind actual_stage actual_parent actual_parent_identity stage_identity stage_fingerprint \
             restore_parent_physical restore_parent_identity <<<"$stage_info"
+        if [[ "$stage_kind" == CANCELLED ]]; then
+            cancel_journal_move "$journal_index" || return 74
+            return "$stage_status"
+        fi
         if [[ "$stage_kind" == UNOWNED_RESTORED || "$stage_kind" == UNOWNED_DISPLACED ]]; then
             record_unowned_move "$journal_index" "$stage_kind" "$actual_stage" "$actual_parent" \
                 "$actual_parent_identity" "$stage_identity" "$stage_fingerprint" || return $?
@@ -2757,6 +2780,7 @@ rollback_transaction() {
                     "${JOURNAL_PUBLICATION_FINGERPRINT[$i]}"
                 entry_status=$?
                 ;;
+            CANCELLED) entry_status=0 ;;
             *) entry_status=2 ;;
         esac
         if [[ $entry_status -eq 2 ]]; then

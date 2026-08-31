@@ -1743,13 +1743,14 @@ STUB
 }
 
 test_install_backup_target_stage_swap_back_changed_destination_is_ambiguous() {
-    local move_stub target staging recovery
+    local move_stub target expected_identity staging recovery
     new_fixture
     mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
     printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
     printf 'original\n' >"$TEST_TMP/home/.config/demo/config"
     write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
     target="$TEST_TMP/home/.config/demo/config"
+    expected_identity="$(/usr/bin/stat -f '%d:%i' "$target")"
     move_stub="$TEST_TMP/mv-target-stage-swap-back"
     cat >"$move_stub" <<STUB
 #!/bin/sh
@@ -1785,6 +1786,10 @@ STUB
     assert_contains 'MOVE_AMBIGUOUS operation=backup_target_stage' || return 1
     [[ "$CLI_OUTPUT" != *'MOVE_NOOP operation=backup_target_stage'* ]] || return 1
     [[ "$CLI_OUTPUT" != *UNOWNED_DISPLACED* && "$CLI_OUTPUT" != *'identity=F:'* ]] || return 1
+    [[ "$CLI_OUTPUT" != *'ROLLBACK_REFUSED .config/demo/config'* ]] || \
+        fail "ambiguous stage was treated as owned: $CLI_OUTPUT" || return 1
+    [[ "$CLI_OUTPUT" != *"recovery path unavailable identity=$expected_identity"* ]] || \
+        fail "restored original was falsely reported unavailable: $CLI_OUTPUT" || return 1
     recovery="$(find "$TEST_TMP/state/backups" -name report-recovery.tsv -type f -print)"
     [[ -n "$recovery" ]] || fail 'ambiguous target-to-stage move lost durable report evidence' || return 1
     grep -Fq $'MOVE_AMBIGUOUS\tbackup_target_stage\t' "$recovery"
