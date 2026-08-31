@@ -2034,6 +2034,10 @@ path_with_replaced_prefix() {
 path_with_refreshed_storage_prefix() {
     local path=$1 previous_state=$2 previous_transaction=$3 current_transaction=$4
     local previous_backup=$5 current_backup=$6
+    local previous_backup_files=$7 current_backup_files=$8
+    if [[ -n "$previous_backup_files" && -n "$current_backup_files" ]]; then
+        path=$(path_with_replaced_prefix "$path" "$previous_backup_files" "$current_backup_files") || return 74
+    fi
     if [[ -n "$previous_transaction" && -n "$current_transaction" ]]; then
         path=$(path_with_replaced_prefix "$path" "$previous_transaction" "$current_transaction") || return 74
     fi
@@ -2047,6 +2051,7 @@ refresh_journal_locations_after_hook() {
     local previous_state_physical=$1 i info actual actual_parent actual_parent_identity actual_name
     local publication_path aux_path unowned_path expected_name status=0
     local previous_transaction_root=$TRANSACTION_ROOT_PHYSICAL previous_backup_root=$BACKUP_ROOT_PHYSICAL
+    local previous_backup_files=$BACKUP_FILES
     refresh_state_physical_from_cwd || return 74
     refresh_pinned_state_storage || status=74
     refresh_report_recovery_location || status=74
@@ -2055,39 +2060,39 @@ refresh_journal_locations_after_hook() {
         if [[ -n "$publication_path" ]]; then
             publication_path=$(path_with_refreshed_storage_prefix "$publication_path" "$previous_state_physical" \
                 "$previous_transaction_root" "$TRANSACTION_ROOT_PHYSICAL" "$previous_backup_root" \
-                "$BACKUP_ROOT_PHYSICAL") || return 74
+                "$BACKUP_ROOT_PHYSICAL" "$previous_backup_files" "$BACKUP_FILES") || return 74
             JOURNAL_PUBLICATION[$i]=$publication_path
             JOURNAL_PUBLICATION_PARENT_PHYSICAL[$i]=$(path_with_refreshed_storage_prefix \
                 "${JOURNAL_PUBLICATION_PARENT_PHYSICAL[$i]}" "$previous_state_physical" \
                 "$previous_transaction_root" "$TRANSACTION_ROOT_PHYSICAL" "$previous_backup_root" \
-                "$BACKUP_ROOT_PHYSICAL") || return 74
+                "$BACKUP_ROOT_PHYSICAL" "$previous_backup_files" "$BACKUP_FILES") || return 74
         fi
         aux_path=${JOURNAL_AUX[$i]}
         if [[ -n "$aux_path" ]]; then
             aux_path=$(path_with_refreshed_storage_prefix "$aux_path" "$previous_state_physical" \
                 "$previous_transaction_root" "$TRANSACTION_ROOT_PHYSICAL" "$previous_backup_root" \
-                "$BACKUP_ROOT_PHYSICAL") || return 74
+                "$BACKUP_ROOT_PHYSICAL" "$previous_backup_files" "$BACKUP_FILES") || return 74
             JOURNAL_AUX[$i]=$aux_path
             JOURNAL_AUX_PARENT_PHYSICAL[$i]=$(path_with_refreshed_storage_prefix \
                 "${JOURNAL_AUX_PARENT_PHYSICAL[$i]}" "$previous_state_physical" \
                 "$previous_transaction_root" "$TRANSACTION_ROOT_PHYSICAL" "$previous_backup_root" \
-                "$BACKUP_ROOT_PHYSICAL") || return 74
+                "$BACKUP_ROOT_PHYSICAL" "$previous_backup_files" "$BACKUP_FILES") || return 74
         fi
         unowned_path=${JOURNAL_UNOWNED[$i]}
         if [[ -n "$unowned_path" ]]; then
             unowned_path=$(path_with_refreshed_storage_prefix "$unowned_path" "$previous_state_physical" \
                 "$previous_transaction_root" "$TRANSACTION_ROOT_PHYSICAL" "$previous_backup_root" \
-                "$BACKUP_ROOT_PHYSICAL") || return 74
+                "$BACKUP_ROOT_PHYSICAL" "$previous_backup_files" "$BACKUP_FILES") || return 74
             JOURNAL_UNOWNED[$i]=$unowned_path
             JOURNAL_UNOWNED_PARENT_PHYSICAL[$i]=$(path_with_refreshed_storage_prefix \
                 "${JOURNAL_UNOWNED_PARENT_PHYSICAL[$i]}" "$previous_state_physical" \
                 "$previous_transaction_root" "$TRANSACTION_ROOT_PHYSICAL" "$previous_backup_root" \
-                "$BACKUP_ROOT_PHYSICAL") || return 74
+                "$BACKUP_ROOT_PHYSICAL" "$previous_backup_files" "$BACKUP_FILES") || return 74
         fi
         if [[ "${JOURNAL_TYPE[$i]}" == MOVE && -n "${JOURNAL_SECOND[$i]}" ]]; then
             JOURNAL_SECOND[$i]=$(path_with_refreshed_storage_prefix "${JOURNAL_SECOND[$i]}" \
                 "$previous_state_physical" "$previous_transaction_root" "$TRANSACTION_ROOT_PHYSICAL" \
-                "$previous_backup_root" "$BACKUP_ROOT_PHYSICAL") || return 74
+                "$previous_backup_root" "$BACKUP_ROOT_PHYSICAL" "$previous_backup_files" "$BACKUP_FILES") || return 74
         fi
 
         if [[ -n "${JOURNAL_PUBLICATION_IDENTITY[$i]}" ]]; then

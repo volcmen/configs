@@ -2797,6 +2797,58 @@ STUB
     grep -Fqx "$expected_row" "$report" || return 1
 }
 
+test_install_last_precommit_backup_files_swap_restores_owned_backup() {
+    local hook original_identity backup_root report recovery expected_final actual_final
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo" \
+        "$TEST_TMP/outside-backup-files"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'original\n' >"$TEST_TMP/home/.config/demo/config"
+    printf 'foreign-sentinel\n' >"$TEST_TMP/outside-backup-files/sentinel"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    original_identity="$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/demo/config")"
+    hook="$TEST_TMP/swap-backup-files-at-last-precommit"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = last_precommit ]; then
+    backup_root=\$(/usr/bin/find "$TEST_TMP/state/backups" -mindepth 1 -maxdepth 1 -type d -print) || exit
+    [ -n "\$backup_root" ] || exit 91
+    printf '%s\n' "\$backup_root" >"$TEST_TMP/swapped-backup-root"
+    /bin/mv -- "\$backup_root/files" "\$backup_root/files.pinned" || exit
+    /bin/ln -s "$TEST_TMP/outside-backup-files" "\$backup_root/files" || exit
+    : >"$TEST_TMP/backup-files-swap-reached"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'backup-files last-precommit swap falsely succeeded' || return 1
+    [[ -f "$TEST_TMP/backup-files-swap-reached" ]] || fail 'backup-files swap hook was not reached' || return 1
+    [[ -f "$TEST_TMP/home/.config/demo/config" && ! -L "$TEST_TMP/home/.config/demo/config" ]] || \
+        fail 'owned backup was not restored as a regular home file' || return 1
+    [[ "$(<"$TEST_TMP/home/.config/demo/config")" == original ]] || \
+        fail 'restored home content changed' || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/demo/config")" == "$original_identity" ]] || \
+        fail 'restored home inode changed' || return 1
+
+    backup_root="$(<"$TEST_TMP/swapped-backup-root")"
+    [[ -L "$backup_root/files" && "$(readlink "$backup_root/files")" == "$TEST_TMP/outside-backup-files" ]] || return 1
+    [[ "$(<"$TEST_TMP/outside-backup-files/sentinel")" == foreign-sentinel ]] || return 1
+    [[ -z "$(find "$TEST_TMP/outside-backup-files" -mindepth 1 ! -name sentinel -print)" ]] || return 1
+
+    report="$backup_root/report.tsv"
+    recovery="$backup_root/report-recovery.tsv"
+    [[ -f "$report" && ! -L "$report" && -f "$recovery" && ! -L "$recovery" ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$report")" == "$(/usr/bin/stat -f '%d:%i' "$recovery")" ]] || return 1
+    [[ "$(cksum <"$report")" == "$(cksum <"$recovery")" ]] || return 1
+    expected_final="$(printf 'MOVE_FINAL\t.config/demo/config\t%s\t%s' \
+        "$TEST_TMP/home/.config/demo/config" "$backup_root/files.pinned/.config/demo/config")"
+    actual_final="$(awk -F '\t' '$1 == "MOVE_FINAL" { row = $0 } END { print row }' "$report")"
+    [[ "$actual_final" == "$expected_final" ]] || return 1
+    assert_contains "REPORT_RECOVERY location=$recovery" || return 1
+    [[ "$CLI_OUTPUT" != *"$TEST_TMP/outside-backup-files/.config/demo/config"* ]]
+}
+
 test_install_last_precommit_mixed_nested_detach_reports_path_unavailable() {
     local hook owned_identity foreign_identity quarantine
     new_fixture
@@ -4066,6 +4118,7 @@ run_test test_install_signal_at_final_verification_rolls_back_before_commit
 run_test test_install_after_link_publish_root_detach_refreshes_owned_location
 run_test test_install_after_backup_stage_nested_detach_refreshes_restore_location
 run_test test_install_after_backup_move_state_detach_refreshes_report_and_publication
+run_test test_install_last_precommit_backup_files_swap_restores_owned_backup
 run_test test_install_last_precommit_mixed_nested_detach_reports_path_unavailable
 run_test test_install_production_ignores_path_and_test_primitive_overrides
 run_test test_install_test_mode_exercises_bsd_and_gnu_primitive_arguments
