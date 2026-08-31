@@ -35,8 +35,10 @@ Important current facts:
   timeout fix.
 - Four tracked Kitty/Zellij files differ from their live macOS counterparts.
   Those differences must be reconciled explicitly, never overwritten blindly.
-- `home/.config/fontconfig/conf.d/99-readability.conf.backup` is a stale-looking
-  backup candidate, but it may be removed only after equivalence is proved.
+- `home/.config/fontconfig/conf.d/99-readability.conf.backup` is an inactive
+  alternative with materially different rendering values. It must leave the
+  managed home tree but retain its exact historical bytes as a non-deployable
+  compatibility archive.
 - The Yazi recycle-bin plugin is a large vendored third-party component and
   needs explicit version/update ownership.
 - Linux-only files are naturally absent from the current macOS home directory.
@@ -82,6 +84,10 @@ Platform differences are represented in only two ways:
 Linux-only application files remain canonical under `home/.config`; the
 installer simply does not select them on macOS.
 
+Compatibility archives under `docs/compatibility/archive/` are historical
+reference artifacts, not canonical application sources. They stay outside
+`home/`, are excluded from `dotfiles.manifest`, and are never deployed.
+
 ## Repository Layout
 
 ```text
@@ -97,6 +103,8 @@ configs/
 │   ├── dotfiles-test.sh
 │   └── fixtures/
 └── docs/
+    ├── compatibility/
+    │   └── archive/       non-deployable historical alternatives
     └── superpowers/
         ├── specs/
         └── plans/
@@ -333,8 +341,9 @@ static-only even when Lua syntax succeeds.
   key differences. Treat vendored plugin code as pinned third-party content.
 - **mpv:** one config tree using portable auto-selection or conditional profiles
   only when existing behavior requires them.
-- **Fontconfig:** one canonical tree; remove the tracked backup only after the
-  active files validate and compare equivalent.
+- **Fontconfig:** one canonical deployed tree. Preserve the materially distinct
+  inactive alternative byte-for-byte under `docs/compatibility/archive/`,
+  outside `home/` and the manifest, while leaving the active files unchanged.
 
 ### Arch-only
 
@@ -419,7 +428,9 @@ actual Arch/Hyprland machine before those files are declared runtime-valid.
 7. Run the installer and native checks on Arch, then inspect Hyprland runtime
    configuration errors and behavior.
 8. Apply verified required/recommended modernizations one application at a time.
-9. Remove only proven stale backups or obsolete vendor residue.
+9. Remove backup artifacts from the managed home tree only after their
+   disposition is proved; preserve materially distinct alternatives as
+   non-deployable compatibility archives rather than claiming equivalence.
 10. Update README usage, validation levels, recovery instructions, doti
     compatibility, and version-review workflow.
 11. Run the complete verification matrix, obtain independent review, commit,

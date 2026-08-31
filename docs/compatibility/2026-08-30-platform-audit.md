@@ -88,7 +88,7 @@ remain excluded.
 | Required | Hyprland Lua-era animation/dispatcher syntax and UWSM logout needed the reviewed forms. | Animation selectors use `bezier` for the existing Bézier names and `spring` for the existing `easy` spring; DPMS/workspace commands use the Lua dispatchers; logout uses `uwsm stop`. The selector correction is grounded in the [Hyprland 0.56.2 Lua binding](https://github.com/hyprwm/Hyprland/blob/v0.56.2/src/config/lua/bindings/LuaBindingsConfigRules.cpp#L428-L453) and [0.56.2 example](https://github.com/hyprwm/Hyprland/blob/v0.56.2/example/hyprland.lua#L134-L150). No reload was run. See also the [Hyprland animation guide](https://wiki.hypr.land/configuring/core/animations/) and [start guide](https://wiki.hypr.land/Configuring/Start/). |
 | Required | Fuzzel's native candidate validator was unreachable through the generic `ini` manifest row. | The manifest now selects the fixed, allowlisted `fuzzel` validator, which invokes exactly `fuzzel --check-config --config="$file"`. Missing Fuzzel returns status 125 and stays visibly nonblocking; any other nonzero result blocks check and install preflight before mutation. Stubbed argv and mutation-boundary tests pass; real Arch execution remains unverified. |
 | Recommended | Optional Fish tools and the Homebrew path needed explicit availability guards. | Guards were added in `e651449` without changing successful initialization order. |
-| Recommended | The inactive Fontconfig alternative obscured canonical ownership. | Decision and exact evidence are recorded in the Fontconfig section below. |
+| Recommended | The inactive Fontconfig alternative obscured canonical ownership but contained materially distinct rendering values. | Its exact historical bytes are preserved as a non-deployable compatibility archive; disposition and evidence are recorded below. |
 | Optional | Theme, fonts, spacing, layouts, animations, bindings, and startup workflow redesigns. | Excluded. Existing user-visible values and behavior-sensitive files were preserved. |
 | Optional | Unobserved package upgrades or replacement of the vendored Yazi plugin. | Excluded. Review and test an explicit version before changing the manifest baseline or plugin. |
 
@@ -113,16 +113,31 @@ on 2026-08-30:
 This was a source reconciliation, not a live install. No home-directory config
 was applied by Tasks 8–11.
 
-## Fontconfig decision
+## Fontconfig preservation disposition
 
-Before removal, both active `99-readability.conf` and inactive
+Before disposition, both active `99-readability.conf` and inactive
 `99-readability.conf.backup` were valid XML. They were not byte-equivalent and
-the `.backup` contained alternative rendering values. Only files ending in
-`.conf` were part of the managed Fontconfig tree, so the `.backup` alternative
-was inactive. Task 9 removed that inactive alternative after validation while
-leaving `fonts.conf` and active `99-readability.conf` unchanged. This decision
-does not claim the removed file was equivalent to or a duplicate of the active
-configuration.
+were materially different: the inactive alternative selects `lcddefault`,
+while the active config selects `lcdlight` and adds autohint, size-specific,
+and family-specific rules. The alternative therefore must not be described as
+equivalent, duplicate, or disposable.
+
+The exact 805 historical bytes are preserved at
+`docs/compatibility/archive/fontconfig-99-readability-alternative.conf`
+(SHA-256
+`42155db924b65b7a1a5bd9dfdb8423c9debf1ca0031178281791d05a468f1b08`).
+This reference archive is outside `home/`, absent from `dotfiles.manifest`, and
+never deployed. The old `.backup` pathname remains absent from managed `home/`,
+so the manifest deploys exactly one readability config. Native `xmllint`
+validation passes for the two active Fontconfig files and the archive.
+The historical blob ends with an intentional blank line; `.gitattributes`
+disables only the `blank-at-eof` whitespace check for this archive so its exact
+bytes and the repository's normal diff hygiene can both be retained.
+
+The active files remain byte-for-byte unchanged: `fonts.conf` has SHA-256
+`8e14b0ab0f1545a87919ad01fd85e14211c1ebb06cf390a01043bb17d593a105`,
+and active `99-readability.conf` has SHA-256
+`795241374a5e285546266f54baa8a6ddceda4529c2ee64a9463bbf1f2925a31f`.
 
 ## Behavior-preservation baseline
 

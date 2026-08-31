@@ -22,6 +22,19 @@ assert_status() { [[ "$CLI_STATUS" -eq "$1" ]] || fail "status $CLI_STATUS != $1
 assert_contains() { [[ "$CLI_OUTPUT" == *"$1"* ]] || fail "missing <$1>; output: $CLI_OUTPUT"; }
 assert_not_exists() { [[ ! -e "$1" && ! -L "$1" ]] || fail "unexpected path: $1"; }
 
+sha256_file() {
+    local output
+    if command -v shasum >/dev/null 2>&1; then
+        output="$(shasum -a 256 "$1")" || return 1
+    elif command -v sha256sum >/dev/null 2>&1; then
+        output="$(sha256sum "$1")" || return 1
+    else
+        fail 'neither shasum nor sha256sum is available'
+        return 1
+    fi
+    printf '%s\n' "${output%% *}"
+}
+
 fixture_setup_fatal() {
     local stage=$1
     TEST_TMP=""
@@ -4109,6 +4122,82 @@ test_shared_fish_yazi_and_fontconfig_are_portable() {
     xmllint --noout "$fonts_conf" "$readability_conf"
 }
 
+test_fontconfig_archive_preserves_exact_historical_bytes() {
+    local archive="$PROJECT_ROOT/docs/compatibility/archive/fontconfig-99-readability-alternative.conf"
+    local expected_hash='42155db924b65b7a1a5bd9dfdb8423c9debf1ca0031178281791d05a468f1b08'
+    local actual_hash actual_size
+
+    [[ -f "$archive" && ! -L "$archive" ]] || fail "missing regular Fontconfig archive: $archive" || return 1
+    actual_hash="$(sha256_file "$archive")" || return 1
+    actual_size="$(wc -c <"$archive" | tr -d '[:space:]')" || return 1
+    [[ "$actual_hash" == "$expected_hash" ]] || \
+        fail "Fontconfig archive hash $actual_hash != historical hash $expected_hash" || return 1
+    [[ "$actual_size" == 805 ]] || fail "Fontconfig archive size $actual_size != historical size 805"
+}
+
+test_fontconfig_archive_is_valid_xml() {
+    local archive="$PROJECT_ROOT/docs/compatibility/archive/fontconfig-99-readability-alternative.conf"
+
+    [[ -f "$archive" && ! -L "$archive" ]] || fail "missing regular Fontconfig archive: $archive" || return 1
+    [[ "$(sed -n '1p' "$archive")" == '<?xml version="1.0"?>' ]] || return 1
+    grep -Fqx '<fontconfig>' "$archive" || return 1
+    [[ "$(awk 'NF { line=$0 } END { print line }' "$archive")" == '</fontconfig>' ]] || return 1
+    if command -v xmllint >/dev/null 2>&1; then
+        xmllint --noout "$archive"
+    fi
+}
+
+test_fontconfig_archive_materially_differs_from_active() {
+    local archive="$PROJECT_ROOT/docs/compatibility/archive/fontconfig-99-readability-alternative.conf"
+    local active="$PROJECT_ROOT/home/.config/fontconfig/conf.d/99-readability.conf"
+    local archive_lcd active_lcd
+
+    [[ -f "$archive" && ! -L "$archive" ]] || fail "missing regular Fontconfig archive: $archive" || return 1
+    ! cmp -s "$archive" "$active" || fail 'Fontconfig archive unexpectedly equals the active config' || return 1
+    archive_lcd="$(xmllint --xpath 'string(/fontconfig/match/edit[@name="lcdfilter"]/const)' "$archive")" || return 1
+    active_lcd="$(xmllint --xpath 'string(/fontconfig/match/edit[@name="lcdfilter"]/const)' "$active")" || return 1
+    [[ "$archive_lcd" == lcddefault && "$active_lcd" == lcdlight ]] || \
+        fail "Fontconfig alternatives lost their material LCD-filter difference: archive=$archive_lcd active=$active_lcd"
+}
+
+test_fontconfig_active_files_remain_byte_stable() {
+    local fonts_conf="$PROJECT_ROOT/home/.config/fontconfig/fonts.conf"
+    local readability_conf="$PROJECT_ROOT/home/.config/fontconfig/conf.d/99-readability.conf"
+
+    [[ "$(sha256_file "$fonts_conf")" == \
+        '8e14b0ab0f1545a87919ad01fd85e14211c1ebb06cf390a01043bb17d593a105' ]] || \
+        fail 'active fonts.conf bytes changed' || return 1
+    [[ "$(sha256_file "$readability_conf")" == \
+        '795241374a5e285546266f54baa8a6ddceda4529c2ee64a9463bbf1f2925a31f' ]] || \
+        fail 'active 99-readability.conf bytes changed'
+}
+
+test_fontconfig_has_one_deployed_readability_config_and_no_managed_backup() {
+    local active_path='.config/fontconfig/conf.d/99-readability.conf'
+    local archive_name='fontconfig-99-readability-alternative.conf'
+    local manifest_count home_count backup_paths
+
+    manifest_count="$(awk -F'|' -v path="$active_path" '$4 == path { count++ } END { print count + 0 }' \
+        "$PROJECT_ROOT/dotfiles.manifest")" || return 1
+    home_count="$(find "$PROJECT_ROOT/home/.config/fontconfig/conf.d" -type f -name '*readability*.conf' -print | \
+        wc -l | tr -d '[:space:]')" || return 1
+    backup_paths="$(find "$PROJECT_ROOT/home" -name '*.backup' -print)" || return 1
+
+    [[ "$manifest_count" == 1 && "$home_count" == 1 ]] || \
+        fail "expected one deployed readability config; manifest=$manifest_count home=$home_count" || return 1
+    [[ -z "$backup_paths" ]] || fail "managed home contains backup artifacts: $backup_paths" || return 1
+    ! grep -Fq "$archive_name" "$PROJECT_ROOT/dotfiles.manifest" || \
+        fail 'Fontconfig compatibility archive must not be deployed by the manifest'
+}
+
+test_manifest_exactly_covers_managed_home() {
+    local declared managed
+
+    declared="$(awk -F'|' '!/^#/ && NF { print $4 }' "$PROJECT_ROOT/dotfiles.manifest" | LC_ALL=C sort)" || return 1
+    managed="$(cd "$PROJECT_ROOT/home" && find . -type f -print | sed 's#^\./##' | LC_ALL=C sort)" || return 1
+    [[ "$declared" == "$managed" ]] || fail "manifest/home coverage differs; declared: $declared; managed: $managed"
+}
+
 test_hyprland_animations_preserve_values_and_curve_types() {
     local looknfeel="$PROJECT_ROOT/home/.config/hypr/hyprland/looknfeel.lua"
     local actual expected
@@ -4487,6 +4576,12 @@ run_test test_fixture_setup_failures_never_retarget_cleanup
 run_test test_dotfiles_copy_dispatches_portably
 run_test test_shared_terminal_behavior_is_canonical
 run_test test_shared_fish_yazi_and_fontconfig_are_portable
+run_test test_fontconfig_archive_preserves_exact_historical_bytes
+run_test test_fontconfig_archive_is_valid_xml
+run_test test_fontconfig_archive_materially_differs_from_active
+run_test test_fontconfig_active_files_remain_byte_stable
+run_test test_fontconfig_has_one_deployed_readability_config_and_no_managed_backup
+run_test test_manifest_exactly_covers_managed_home
 run_test test_documentation_records_operations_and_compatibility_evidence
 validate_selected_tests
 printf '%s passed; %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"

@@ -1,0 +1,2 @@
+# Preserve the archived historical blob's intentional trailing blank line.
+docs/compatibility/archive/fontconfig-99-readability-alternative.conf whitespace=-blank-at-eof

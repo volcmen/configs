@@ -23,6 +23,8 @@
 - Never overwrite a regular file, foreign symlink, or directory conflict without the exact safety behavior in the spec.
 - Missing native binaries are `RUNTIME UNVERIFIED`, not false passes and not automatic install blockers.
 - Static macOS checks never claim Arch/Hyprland runtime validity.
+- Compatibility archives are historical reference artifacts outside `home/`;
+  they are excluded from `dotfiles.manifest` and never deployed.
 - Secrets, credentials, credential stores, private keys, and auth state are out of scope.
 - Work in small commits and run the task-specific test before every commit.
 
@@ -40,7 +42,7 @@
 | `home/.config/kitty/kitty-kitten-search/*.py` | Existing search kitten, normalized without semantic changes. |
 | `home/.config/zellij/config.kdl` | Canonical bindings plus platform-neutral clipboard command. |
 | `home/.config/yazi/keymap.toml` | Canonical keymap with native per-OS clipboard bindings. |
-| `home/.config/fontconfig/conf.d/99-readability.conf.backup` | Delete after proving it is an unused backup. |
+| `docs/compatibility/archive/fontconfig-99-readability-alternative.conf` | Preserve the exact bytes of the inactive, materially distinct Fontconfig alternative without deploying it. |
 | `home/.config/hypr/hyprland/looknfeel.lua` | Current Hyprland Lua animation selector fields while preserving curve values. |
 | `home/.config/hypr/hypridle.conf` | Current Lua-dispatch DPMS commands with unchanged timeouts. |
 | `home/.config/waybar/config.jsonc` | Current Lua-dispatch workspace actions and UWSM logout. |
@@ -462,8 +464,9 @@ not add a production manifest override.
 
 - [ ] **Step 4: Create the complete v1 manifest**
 
-Create `dotfiles.manifest` with this exact inventory. The stale Fontconfig
-backup is intentionally excluded and the new clipboard helper is included:
+Create `dotfiles.manifest` with this exact inventory. The inactive Fontconfig
+alternative is intentionally excluded because its preserved archive is outside
+the managed home tree; the new clipboard helper is included:
 
 ```text
 # app|platforms|kind|path|validator|required|tested_version
@@ -1189,17 +1192,20 @@ git commit -m "♻️ preserve Kitty and Zellij behavior cross-platform"
 
 ---
 
-### Task 9: Make Fish and Yazi portable and remove the unused Fontconfig backup
+### Task 9: Make Fish and Yazi portable and archive the inactive Fontconfig alternative
 
 **Files:**
 - Modify: `home/.config/fish/config.fish`
 - Modify: `home/.config/yazi/keymap.toml`
 - Delete: `home/.config/fontconfig/conf.d/99-readability.conf.backup`
+- Create: `docs/compatibility/archive/fontconfig-99-readability-alternative.conf`
 - Modify: `tests/dotfiles-test.sh`
 
 **Interfaces:**
 - Consumes: Fish `command -q`/directory checks and Yazi’s native `for = "linux"|"macos"` selector.
-- Produces: no broken aliases when optional tools are absent; equivalent `y` clipboard behavior on each OS; one active Fontconfig source.
+- Produces: no broken aliases when optional tools are absent; equivalent `y`
+  clipboard behavior on each OS; one active Fontconfig source plus one exact,
+  non-deployable historical alternative under the compatibility archive.
 
 - [ ] **Step 1: Add failing portability tests**
 
@@ -1210,14 +1216,20 @@ Add assertions that:
   `command -q`;
 - the Linux Yazi `y` mapping contains `for = "linux"` and `wl-copy`;
 - the macOS Yazi `y` mapping contains `for = "macos"` and `pbcopy`;
-- the `.backup` file no longer exists;
-- `xmllint --noout` succeeds on both active Fontconfig XML files.
+- the `.backup` file no longer exists under managed `home/`;
+- the compatibility archive exists, is excluded from the manifest, and matches
+  the historical alternative byte-for-byte;
+- the manifest exactly covers the managed home files and deploys exactly one
+  readability config;
+- `xmllint --noout` succeeds on both active Fontconfig XML files and the archive;
+- the archive materially differs from the active readability config, whose
+  bytes remain unchanged.
 
 - [ ] **Step 2: Run tests to verify failure**
 
 Run: `bash tests/dotfiles-test.sh`
 
-Expected: Fish/Yazi/backup checks FAIL.
+Expected: Fish/Yazi/archive checks FAIL.
 
 - [ ] **Step 3: Guard Fish paths and optional aliases without changing successful behavior**
 
@@ -1248,11 +1260,16 @@ URI list and `wl-copy -t text/uri-list`; the macOS rule sends the same URI text
 to `pbcopy`. Both rules live in the same `keymap.toml` and differ only by
 `for = "linux"` versus `for = "macos"`.
 
-- [ ] **Step 5: Prove and delete the backup**
+- [ ] **Step 5: Prove and archive the inactive alternative**
 
 Run `xmllint --noout` against the active and backup XML. Record that only files
-ending in `.conf` are part of the managed Fontconfig tree, then delete
-`99-readability.conf.backup`. Do not change active rendering values.
+ending in `.conf` under the managed Fontconfig tree are deployed. Because the
+backup is valid XML but materially differs from the active config, preserve its
+exact bytes as
+`docs/compatibility/archive/fontconfig-99-readability-alternative.conf`, then
+remove `99-readability.conf.backup` from `home/`. Exclude the archive from
+`dotfiles.manifest`, retain exact manifest coverage of `home/`, and do not
+change either active Fontconfig file.
 
 - [ ] **Step 6: Run shared-config validation**
 
@@ -1262,6 +1279,7 @@ Run:
 fish -n home/.config/fish/config.fish
 xmllint --noout home/.config/fontconfig/fonts.conf
 xmllint --noout home/.config/fontconfig/conf.d/99-readability.conf
+xmllint --noout docs/compatibility/archive/fontconfig-99-readability-alternative.conf
 STARSHIP_CONFIG="$PWD/home/.config/starship.toml" STARSHIP_LOG=error starship print-config >/dev/null
 git config --file home/.config/git/config --list >/dev/null
 bash tests/dotfiles-test.sh
@@ -1272,7 +1290,7 @@ Expected: every command PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add home/.config/fish/config.fish home/.config/yazi/keymap.toml home/.config/fontconfig tests/dotfiles-test.sh
+git add home/.config/fish/config.fish home/.config/yazi/keymap.toml home/.config/fontconfig docs/compatibility/archive/fontconfig-99-readability-alternative.conf tests/dotfiles-test.sh
 git commit -m "♻️ make shared shell and file configs portable"
 ```
 
@@ -1427,7 +1445,8 @@ Fontconfig 2.18.3
 ```
 
 Include required/recommended/optional findings, the exact four live drift files,
-the behavior-sensitive pre/post hashes, the Fontconfig-backup decision, and an
+the behavior-sensitive pre/post hashes, the Fontconfig preservation
+disposition, and an
 `unverified` row for every Arch binary whose installed version was unavailable.
 Use only official URLs already referenced by the spec/research; label every
 unconfirmed claim as unverified.
