@@ -17,17 +17,27 @@ MF_APP=(); MF_PLATFORMS=(); MF_KIND=(); MF_PATH=()
 MF_VALIDATOR=(); MF_REQUIRED=(); MF_TESTED=()
 PLAN_ACTION=(); PLAN_APP=(); PLAN_PATH=(); PLAN_SOURCE=(); PLAN_TARGET=()
 PLAN_DETAIL=()
+PLAN_SOURCE_IDENTITY=(); PLAN_SOURCE_FINGERPRINT=(); PLAN_TARGET_IDENTITY=()
+PLAN_PARENT_PHYSICAL=(); PLAN_PARENT_IDENTITY=(); PLAN_PUBLISHED_IDENTITY=()
+PLAN_BACKUP_PATH=(); PLAN_BACKUP_FINGERPRINT=()
 PLAN_VALIDATION_LEVEL=(); PLAN_VALIDATION_APP=(); PLAN_VALIDATION_PATH=(); PLAN_VALIDATION_DETAIL=()
 PLAN_NEEDS_BACKUP=0
 
 STATE_ROOT=''; STATE_ROOT_PHYSICAL=''; STATE_ROOT_IDENTITY=''; TRANSACTION_START_DIR=''
+INSTALL_ROOT_PHYSICAL=''; INSTALL_ROOT_IDENTITY=''
+PINNED_INSTALL_PATH=(); PINNED_INSTALL_PHYSICAL=(); PINNED_INSTALL_IDENTITY=(); PINNED_INSTALL_COUNT=0
 LOCK_PATH='install.lock'; LOCK_HELD=0
 TRANSACTION_ROOT=''; QUARANTINE_ROOT=''; BACKUP_ROOT=''; BACKUP_FILES=''; REPORT_PATH=''
 JOURNAL_TYPE=(); JOURNAL_RELATIVE=(); JOURNAL_FIRST=(); JOURNAL_SECOND=(); JOURNAL_IDENTITY=()
-JOURNAL_AUX=(); JOURNAL_AUX_RELATIVE=(); JOURNAL_EXTRA=(); JOURNAL_EXTRA_RELATIVE=()
+JOURNAL_AUX=(); JOURNAL_AUX_RELATIVE=()
+JOURNAL_PARENT_PHYSICAL=(); JOURNAL_PARENT_IDENTITY=()
+JOURNAL_AUX_PARENT_PHYSICAL=(); JOURNAL_AUX_PARENT_IDENTITY=()
+JOURNAL_PUBLICATION=(); JOURNAL_PUBLICATION_RELATIVE=()
+JOURNAL_PUBLICATION_PARENT_PHYSICAL=(); JOURNAL_PUBLICATION_PARENT_IDENTITY=()
 JOURNAL_COUNT=0; MUTATION_COUNT=0; TEST_FAIL_AFTER=''
 TRANSACTION_ACTIVE=0; CLEANUP_ACTIVE=0; PENDING_SIGNAL=0
-TRANSACTION_MOVE_STYLE=''
+TRANSACTION_STAT_STYLE=''; TRANSACTION_STAT_COMMAND=''
+TRANSACTION_MOVE_STYLE=''; TRANSACTION_MOVE_COMMAND=''
 HYPRLAND_RUNTIME_PROBED=0; HYPRLAND_RUNTIME_STATUS=125; HYPRLAND_RUNTIME_DETAIL=''
 VERSION_APP=(); VERSION_VALUE=(); OBSERVED_VERSION=''
 
@@ -627,6 +637,7 @@ command_diff() {
 
 build_install_plan() {
     local allow_backup=${1:-0} host source target_path status source_status action detail validator_output validator_status i result_index
+    local source_identity source_fingerprint target_identity
     local conflict=0 blocked=0
 
     detect_host >/dev/null
@@ -637,6 +648,9 @@ build_install_plan() {
     parse_manifest "$MANIFEST"
     PLAN_ACTION=(); PLAN_APP=(); PLAN_PATH=(); PLAN_SOURCE=(); PLAN_TARGET=()
     PLAN_DETAIL=()
+    PLAN_SOURCE_IDENTITY=(); PLAN_SOURCE_FINGERPRINT=(); PLAN_TARGET_IDENTITY=()
+    PLAN_PARENT_PHYSICAL=(); PLAN_PARENT_IDENTITY=(); PLAN_PUBLISHED_IDENTITY=()
+    PLAN_BACKUP_PATH=(); PLAN_BACKUP_FINGERPRINT=()
     PLAN_VALIDATION_LEVEL=(); PLAN_VALIDATION_APP=(); PLAN_VALIDATION_PATH=(); PLAN_VALIDATION_DETAIL=()
     PLAN_NEEDS_BACKUP=0
 
@@ -651,6 +665,9 @@ build_install_plan() {
         fi
         source_status=$(canonical_source_state "$source")
         detail=''
+        source_identity=''
+        source_fingerprint=''
+        target_identity=''
         case "$source_status:${MF_REQUIRED[$i]}" in
             ABSENT:no)
                 action=SKIPPED
@@ -667,31 +684,48 @@ build_install_plan() {
                 blocked=1
                 ;;
             PRESENT:*)
-                status=$(artifact_status "$source" "$target_path")
-                case "$status" in
-                    MISSING) action=CREATE ;;
-                    LINKED) action=NOOP ;;
-                    BLOCKED) action=BLOCKED; blocked=1 ;;
-                    TYPE_CONFLICT)
-                        if [[ "$allow_backup" == 1 ]]; then
-                            action=BLOCKED
-                            blocked=1
-                        else
-                            action=CONFLICT
-                            conflict=1
-                        fi
-                        ;;
-                    DRIFT|MATCH|FOREIGN_LINK)
-                        if [[ "$allow_backup" == 1 ]]; then
-                            action=BACKUP
-                            PLAN_NEEDS_BACKUP=1
-                        else
-                            action=CONFLICT
-                            conflict=1
-                        fi
-                        ;;
-                    *) action=BLOCKED; blocked=1 ;;
-                esac
+                source_identity=$(path_identity "$source") || source_identity=''
+                source_fingerprint=$(path_fingerprint "$source") || source_fingerprint=''
+                if [[ -z "$source_identity" || -z "$source_fingerprint" ]]; then
+                    action=BLOCKED
+                    detail='canonical source identity is unavailable'
+                    blocked=1
+                else
+                    status=$(artifact_status "$source" "$target_path")
+                    case "$status" in
+                        MISSING) action=CREATE ;;
+                        LINKED)
+                            target_identity=$(path_identity "$target_path") || target_identity=''
+                            if [[ -n "$target_identity" ]]; then
+                                action=NOOP
+                            else
+                                action=BLOCKED
+                                detail='linked target identity is unavailable'
+                                blocked=1
+                            fi
+                            ;;
+                        BLOCKED) action=BLOCKED; blocked=1 ;;
+                        TYPE_CONFLICT)
+                            if [[ "$allow_backup" == 1 ]]; then
+                                action=BLOCKED
+                                blocked=1
+                            else
+                                action=CONFLICT
+                                conflict=1
+                            fi
+                            ;;
+                        DRIFT|MATCH|FOREIGN_LINK)
+                            if [[ "$allow_backup" == 1 ]]; then
+                                action=BACKUP
+                                PLAN_NEEDS_BACKUP=1
+                            else
+                                action=CONFLICT
+                                conflict=1
+                            fi
+                            ;;
+                        *) action=BLOCKED; blocked=1 ;;
+                    esac
+                fi
                 ;;
         esac
         PLAN_ACTION[${#PLAN_ACTION[@]}]=$action
@@ -700,6 +734,14 @@ build_install_plan() {
         PLAN_SOURCE[${#PLAN_SOURCE[@]}]=$source
         PLAN_TARGET[${#PLAN_TARGET[@]}]=$target_path
         PLAN_DETAIL[${#PLAN_DETAIL[@]}]=$detail
+        PLAN_SOURCE_IDENTITY[${#PLAN_SOURCE_IDENTITY[@]}]=$source_identity
+        PLAN_SOURCE_FINGERPRINT[${#PLAN_SOURCE_FINGERPRINT[@]}]=$source_fingerprint
+        PLAN_TARGET_IDENTITY[${#PLAN_TARGET_IDENTITY[@]}]=$target_identity
+        PLAN_PARENT_PHYSICAL[${#PLAN_PARENT_PHYSICAL[@]}]=''
+        PLAN_PARENT_IDENTITY[${#PLAN_PARENT_IDENTITY[@]}]=''
+        PLAN_PUBLISHED_IDENTITY[${#PLAN_PUBLISHED_IDENTITY[@]}]=''
+        PLAN_BACKUP_PATH[${#PLAN_BACKUP_PATH[@]}]=''
+        PLAN_BACKUP_FINGERPRINT[${#PLAN_BACKUP_FINGERPRINT[@]}]=''
 
         if [[ "$source_status" == PRESENT ]]; then
             validator_output=$(run_validator "${MF_VALIDATOR[$i]}" "$source" "$host" 2>&1)
@@ -752,9 +794,81 @@ state_root() {
     printf '%s/dotfiles\n' "${XDG_STATE_HOME:-$HOME/.local/state}"
 }
 
+capture_directory_pin() (
+    local path=$1 physical identity
+    [[ -d "$path" && ! -L "$path" ]] || return 1
+    cd -P -- "$path" || return 1
+    physical=$(pwd -P) || return 1
+    identity=$(path_identity .) || return 1
+    printf '%s\t%s\n' "$identity" "$physical"
+)
+
+remember_install_path_pin() {
+    local path=$1 physical=$2 identity=$3 i
+    for ((i=0; i<PINNED_INSTALL_COUNT; i++)); do
+        [[ "${PINNED_INSTALL_PATH[$i]}" != "$path" ]] || return 0
+    done
+    PINNED_INSTALL_PATH[$PINNED_INSTALL_COUNT]=$path
+    PINNED_INSTALL_PHYSICAL[$PINNED_INSTALL_COUNT]=$physical
+    PINNED_INSTALL_IDENTITY[$PINNED_INSTALL_COUNT]=$identity
+    PINNED_INSTALL_COUNT=$((PINNED_INSTALL_COUNT + 1))
+}
+
+pin_planned_install_root() {
+    local pin identity physical i current component
+    local components=()
+    PINNED_INSTALL_PATH=(); PINNED_INSTALL_PHYSICAL=(); PINNED_INSTALL_IDENTITY=(); PINNED_INSTALL_COUNT=0
+    pin=$(capture_directory_pin "$EFFECTIVE_HOME") || return 65
+    IFS=$'\t' read -r identity physical <<<"$pin"
+    [[ -n "$identity" && -n "$physical" ]] || return 65
+    INSTALL_ROOT_IDENTITY=$identity
+    INSTALL_ROOT_PHYSICAL=$physical
+    remember_install_path_pin "$EFFECTIVE_HOME" "$physical" "$identity"
+
+    for ((i=0; i<${#PLAN_PATH[@]}; i++)); do
+        current=$EFFECTIVE_HOME
+        IFS=/ read -r -a components <<<"${PLAN_PATH[$i]}"
+        for ((component=0; component<${#components[@]}-1; component++)); do
+            current="$current/${components[$component]}"
+            [[ ! -L "$current" ]] || return 65
+            if [[ -e "$current" ]]; then
+                pin=$(capture_directory_pin "$current") || return 65
+                IFS=$'\t' read -r identity physical <<<"$pin"
+                remember_install_path_pin "$current" "$physical" "$identity"
+            else
+                break
+            fi
+        done
+    done
+}
+
+pinned_install_names_match() {
+    local i identity physical
+    for ((i=0; i<PINNED_INSTALL_COUNT; i++)); do
+        [[ -d "${PINNED_INSTALL_PATH[$i]}" && ! -L "${PINNED_INSTALL_PATH[$i]}" ]] || return 1
+        identity=$(path_identity "${PINNED_INSTALL_PATH[$i]}") || return 1
+        [[ "$identity" == "${PINNED_INSTALL_IDENTITY[$i]}" ]] || return 1
+        physical=$(physical_dir "${PINNED_INSTALL_PATH[$i]}") || return 1
+        [[ "$physical" == "${PINNED_INSTALL_PHYSICAL[$i]}" ]] || return 1
+    done
+}
+
+install_root_name_matches_pin() {
+    local identity physical
+    [[ -d "$EFFECTIVE_HOME" && ! -L "$EFFECTIVE_HOME" ]] || return 1
+    identity=$(path_identity "$EFFECTIVE_HOME") || return 1
+    [[ "$identity" == "$INSTALL_ROOT_IDENTITY" ]] || return 1
+    physical=$(physical_dir "$EFFECTIVE_HOME") || return 1
+    [[ "$physical" == "$INSTALL_ROOT_PHYSICAL" ]]
+}
+
 reset_transaction_journal() {
     JOURNAL_TYPE=(); JOURNAL_RELATIVE=(); JOURNAL_FIRST=(); JOURNAL_SECOND=(); JOURNAL_IDENTITY=()
-    JOURNAL_AUX=(); JOURNAL_AUX_RELATIVE=(); JOURNAL_EXTRA=(); JOURNAL_EXTRA_RELATIVE=()
+    JOURNAL_AUX=(); JOURNAL_AUX_RELATIVE=()
+    JOURNAL_PARENT_PHYSICAL=(); JOURNAL_PARENT_IDENTITY=()
+    JOURNAL_AUX_PARENT_PHYSICAL=(); JOURNAL_AUX_PARENT_IDENTITY=()
+    JOURNAL_PUBLICATION=(); JOURNAL_PUBLICATION_RELATIVE=()
+    JOURNAL_PUBLICATION_PARENT_PHYSICAL=(); JOURNAL_PUBLICATION_PARENT_IDENTITY=()
     JOURNAL_COUNT=0
     MUTATION_COUNT=0
     PENDING_SIGNAL=0
@@ -770,8 +884,12 @@ reset_transaction_journal() {
 
 path_identity() {
     local identity
-    identity=$(stat -f '%d:%i' "$1" 2>/dev/null) || identity=$(stat -c '%d:%i' "$1" 2>/dev/null) || return 1
-    [[ -n "$identity" ]] || return 1
+    case "$TRANSACTION_STAT_STYLE" in
+        bsd) identity=$("$TRANSACTION_STAT_COMMAND" -f '%d:%i' "$1" 2>/dev/null) || return 1 ;;
+        gnu) identity=$("$TRANSACTION_STAT_COMMAND" -c '%d:%i' -- "$1" 2>/dev/null) || return 1 ;;
+        *) return 1 ;;
+    esac
+    [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
     printf '%s\n' "$identity"
 }
 
@@ -788,21 +906,42 @@ path_fingerprint() {
     fi
 }
 
-select_transaction_move_style() {
-    local kernel
+select_transaction_primitives() {
+    local kernel stat_command move_command
     kernel=$(/usr/bin/uname -s 2>/dev/null) || return 74
+    if [[ ${DOTFILES_TESTING:-0} == 1 && -n ${DOTFILES_TEST_TRANSACTION_KERNEL:-} ]]; then
+        kernel=$DOTFILES_TEST_TRANSACTION_KERNEL
+    fi
     case "$kernel" in
-        Darwin) TRANSACTION_MOVE_STYLE=bsd ;;
-        Linux) TRANSACTION_MOVE_STYLE=gnu ;;
+        Darwin)
+            TRANSACTION_STAT_STYLE=bsd
+            stat_command=/usr/bin/stat
+            TRANSACTION_MOVE_STYLE=bsd
+            move_command=/bin/mv
+            ;;
+        Linux)
+            TRANSACTION_STAT_STYLE=gnu
+            stat_command=/usr/bin/stat
+            TRANSACTION_MOVE_STYLE=gnu
+            move_command=/usr/bin/mv
+            ;;
         *) return 74 ;;
     esac
+    if [[ ${DOTFILES_TESTING:-0} == 1 ]]; then
+        [[ -z ${DOTFILES_TEST_STAT_COMMAND:-} ]] || stat_command=$DOTFILES_TEST_STAT_COMMAND
+        [[ -z ${DOTFILES_TEST_MOVE_COMMAND:-} ]] || move_command=$DOTFILES_TEST_MOVE_COMMAND
+    fi
+    [[ "$stat_command" == /* && -x "$stat_command" ]] || return 74
+    [[ "$move_command" == /* && -x "$move_command" ]] || return 74
+    TRANSACTION_STAT_COMMAND=$stat_command
+    TRANSACTION_MOVE_COMMAND=$move_command
 }
 
 move_no_clobber_exact() {
     [[ $# -eq 2 ]] || return 74
     case "$TRANSACTION_MOVE_STYLE" in
-        bsd) command mv -h -n -- "$1" "$2" ;;
-        gnu) command mv -n -T -- "$1" "$2" ;;
+        bsd) "$TRANSACTION_MOVE_COMMAND" -h -n -- "$1" "$2" ;;
+        gnu) "$TRANSACTION_MOVE_COMMAND" -n -T -- "$1" "$2" ;;
         *) return 74 ;;
     esac
 }
@@ -912,7 +1051,8 @@ append_report() {
 }
 
 journal_move() {
-    local relative_path=$1 target_path=$2 backup_path=$3 fingerprint=$4 stage_path=$5 stage_relative=$6 i=$JOURNAL_COUNT
+    local relative_path=$1 target_path=$2 backup_path=$3 fingerprint=$4 stage_path=$5 stage_relative=$6
+    local parent_physical=$7 parent_identity=$8 i=$JOURNAL_COUNT
     JOURNAL_TYPE[$i]=MOVE
     JOURNAL_RELATIVE[$i]=$relative_path
     JOURNAL_FIRST[$i]=$target_path
@@ -920,14 +1060,21 @@ journal_move() {
     JOURNAL_IDENTITY[$i]=$fingerprint
     JOURNAL_AUX[$i]=$stage_path
     JOURNAL_AUX_RELATIVE[$i]=$stage_relative
-    JOURNAL_EXTRA[$i]=''
-    JOURNAL_EXTRA_RELATIVE[$i]=''
+    JOURNAL_PARENT_PHYSICAL[$i]=$parent_physical
+    JOURNAL_PARENT_IDENTITY[$i]=$parent_identity
+    JOURNAL_AUX_PARENT_PHYSICAL[$i]=$parent_physical
+    JOURNAL_AUX_PARENT_IDENTITY[$i]=$parent_identity
+    JOURNAL_PUBLICATION[$i]=''
+    JOURNAL_PUBLICATION_RELATIVE[$i]=''
+    JOURNAL_PUBLICATION_PARENT_PHYSICAL[$i]=''
+    JOURNAL_PUBLICATION_PARENT_IDENTITY[$i]=''
     JOURNAL_COUNT=$((JOURNAL_COUNT + 1))
     append_report MOVE "$relative_path" "$target_path" "$STATE_ROOT_PHYSICAL/$backup_path"
 }
 
 journal_link() {
-    local relative_path=$1 source=$2 target_path=$3 temp_path=$4 temp_relative=$5 i=$JOURNAL_COUNT
+    local relative_path=$1 source=$2 target_path=$3 temp_path=$4 temp_relative=$5
+    local parent_physical=$6 parent_identity=$7 i=$JOURNAL_COUNT
     JOURNAL_TYPE[$i]=LINK
     JOURNAL_RELATIVE[$i]=$relative_path
     JOURNAL_FIRST[$i]=$source
@@ -935,8 +1082,14 @@ journal_link() {
     JOURNAL_IDENTITY[$i]=''
     JOURNAL_AUX[$i]=$temp_path
     JOURNAL_AUX_RELATIVE[$i]=$temp_relative
-    JOURNAL_EXTRA[$i]=''
-    JOURNAL_EXTRA_RELATIVE[$i]=''
+    JOURNAL_PARENT_PHYSICAL[$i]=$parent_physical
+    JOURNAL_PARENT_IDENTITY[$i]=$parent_identity
+    JOURNAL_AUX_PARENT_PHYSICAL[$i]=$parent_physical
+    JOURNAL_AUX_PARENT_IDENTITY[$i]=$parent_identity
+    JOURNAL_PUBLICATION[$i]=''
+    JOURNAL_PUBLICATION_RELATIVE[$i]=''
+    JOURNAL_PUBLICATION_PARENT_PHYSICAL[$i]=''
+    JOURNAL_PUBLICATION_PARENT_IDENTITY[$i]=''
     JOURNAL_COUNT=$((JOURNAL_COUNT + 1))
     append_report LINK "$relative_path" "$source" "$target_path"
 }
@@ -948,11 +1101,15 @@ set_journal_link_identity() {
 set_journal_aux_location() {
     JOURNAL_AUX[$1]=$2
     JOURNAL_AUX_RELATIVE[$1]=$3
+    JOURNAL_AUX_PARENT_PHYSICAL[$1]=$4
+    JOURNAL_AUX_PARENT_IDENTITY[$1]=$5
 }
 
-set_journal_extra_location() {
-    JOURNAL_EXTRA[$1]=$2
-    JOURNAL_EXTRA_RELATIVE[$1]=$3
+set_journal_publication_location() {
+    JOURNAL_PUBLICATION[$1]=$2
+    JOURNAL_PUBLICATION_RELATIVE[$1]=$3
+    JOURNAL_PUBLICATION_PARENT_PHYSICAL[$1]=$4
+    JOURNAL_PUBLICATION_PARENT_IDENTITY[$1]=$5
 }
 
 sibling_relative_path() {
@@ -990,16 +1147,19 @@ prepare_install_parent() {
     local relative_path=$1 expected_root=$2 component physical parent_physical i
     local components=()
 
-    [[ ! -L "$EFFECTIVE_HOME" && -d "$EFFECTIVE_HOME" ]] || return 1
+    install_root_name_matches_pin && pinned_install_names_match || return 1
     install_test_hook before_prepare_parent "$EFFECTIVE_HOME" || return 1
+    install_root_name_matches_pin && pinned_install_names_match || return 1
     cd -P -- "$EFFECTIVE_HOME" || return 1
     physical=$(pwd -P) || return 1
     [[ "$physical" == "$expected_root" ]] || return 1
+    [[ "$(path_identity .)" == "$INSTALL_ROOT_IDENTITY" ]] || return 1
     TARGET_ROOT_PHYSICAL=$expected_root
 
     IFS=/ read -r -a components <<<"$relative_path"
     for ((i=0; i<${#components[@]}-1; i++)); do
         component=${components[$i]}
+        pinned_install_names_match || return 1
         [[ ! -L "$component" ]] || return 1
         if [[ -e "$component" ]]; then
             [[ -d "$component" ]] || return 1
@@ -1012,6 +1172,7 @@ prepare_install_parent() {
         physical=$(pwd -P) || return 1
         [[ "$physical" == "$parent_physical/$component" ]] || return 1
         path_within "$physical" "$TARGET_ROOT_PHYSICAL" || return 1
+        pinned_install_names_match || return 1
     done
 }
 
@@ -1019,10 +1180,11 @@ pin_existing_install_parent() {
     local relative_path=$1 expected_root=$2 component physical parent_physical i
     local components=()
 
-    [[ ! -L "$EFFECTIVE_HOME" && -d "$EFFECTIVE_HOME" ]] || return 1
+    install_root_name_matches_pin && pinned_install_names_match || return 1
     cd -P -- "$EFFECTIVE_HOME" || return 1
     physical=$(pwd -P) || return 1
     [[ "$physical" == "$expected_root" ]] || return 1
+    [[ "$(path_identity .)" == "$INSTALL_ROOT_IDENTITY" ]] || return 1
     TARGET_ROOT_PHYSICAL=$expected_root
 
     IFS=/ read -r -a components <<<"$relative_path"
@@ -1034,11 +1196,29 @@ pin_existing_install_parent() {
         physical=$(pwd -P) || return 1
         [[ "$physical" == "$parent_physical/$component" ]] || return 1
         path_within "$physical" "$TARGET_ROOT_PHYSICAL" || return 1
+        pinned_install_names_match || return 1
     done
 }
 
+publication_parent_matches_pin() {
+    local target_path=$1 expected_physical=$2 expected_identity=$3 named_parent physical identity named_physical named_identity
+    install_root_name_matches_pin && pinned_install_names_match || return 1
+    physical=$(pwd -P) || return 1
+    identity=$(path_identity .) || return 1
+    if [[ -n "$expected_physical" || -n "$expected_identity" ]]; then
+        [[ "$physical" == "$expected_physical" && "$identity" == "$expected_identity" ]] || return 1
+    fi
+    named_parent=${target_path%/*}
+    [[ -d "$named_parent" && ! -L "$named_parent" ]] || return 1
+    named_physical=$(physical_dir "$named_parent") || return 1
+    named_identity=$(path_identity "$named_parent") || return 1
+    [[ "$named_physical" == "$physical" && "$named_identity" == "$identity" ]] || return 1
+    path_within "$physical" "$INSTALL_ROOT_PHYSICAL"
+}
+
 pin_apply_target_parent() {
-    local source=$1 target_path=$2 relative_path=$3 prepare=$4 expected_root
+    local source=$1 target_path=$2 relative_path=$3 prepare=$4
+    local expected_parent_physical=${5:-} expected_parent_identity=${6:-} expected_root
     TARGET_RELATIVE_PATH=$relative_path
     safe_source "$source" || return 65
     TARGET_ROOT_PHYSICAL=''
@@ -1052,26 +1232,32 @@ pin_apply_target_parent() {
     fi
     safe_target "$target_path" || return 65
     safe_source "$source" || return 65
+    publication_parent_matches_pin "$target_path" "$expected_parent_physical" "$expected_parent_identity" || return 65
 }
 
 inspect_install_entry() (
-    local action=$1 source=$2 target_path=$3 relative_path=$4 observed target_name
+    local action=$1 source=$2 target_path=$3 relative_path=$4 observed target_name fingerprint physical identity
     pin_apply_target_parent "$source" "$target_path" "$relative_path" 1 || return $?
     observed=$(artifact_status "$source" "$target_path")
     case "$action:$observed" in
-        CREATE:MISSING) printf '%s\n' '-' ;;
+        CREATE:MISSING) fingerprint='-' ;;
         BACKUP:DRIFT|BACKUP:MATCH|BACKUP:FOREIGN_LINK)
             target_name=${relative_path##*/}
-            path_fingerprint "$target_name" || return 65
+            fingerprint=$(path_fingerprint "$target_name") || return 65
             ;;
         *) return 65 ;;
     esac
+    publication_parent_matches_pin "$target_path" '' '' || return 65
+    physical=$(pwd -P) || return 65
+    identity=$(path_identity .) || return 65
+    printf '%s\t%s\t%s\n' "$fingerprint" "$physical" "$identity"
 )
 
 stage_backup_target() (
     local source=$1 target_path=$2 relative_path=$3 stage_path=$4 recovery_path=$5 expected_fingerprint=$6
+    local expected_parent_physical=$7 expected_parent_identity=$8
     local target_name stage_name recovery_name observed nested recovery_nested actual stage_status
-    pin_apply_target_parent "$source" "$target_path" "$relative_path" 0 || return $?
+    pin_apply_target_parent "$source" "$target_path" "$relative_path" 0 "$expected_parent_physical" "$expected_parent_identity" || return $?
     observed=$(artifact_status "$source" "$target_path")
     case "$observed" in DRIFT|MATCH|FOREIGN_LINK) ;; *) return 65 ;; esac
     target_name=${relative_path##*/}
@@ -1080,8 +1266,10 @@ stage_backup_target() (
     [[ ! -e "$stage_name" && ! -L "$stage_name" && ! -e "$recovery_name" && ! -L "$recovery_name" ]] || return 74
     [[ "$(path_fingerprint "$target_name")" == "$expected_fingerprint" ]] || return 65
     install_test_hook before_backup_stage "$target_path" "$stage_path" "$recovery_path" || return $?
+    publication_parent_matches_pin "$target_path" "$expected_parent_physical" "$expected_parent_identity" || return 65
     [[ "$(path_fingerprint "$target_name")" == "$expected_fingerprint" ]] || return 65
     move_no_clobber_exact "$target_name" "$stage_name" || return 74
+    publication_parent_matches_pin "$target_path" "$expected_parent_physical" "$expected_parent_identity" || return 74
     [[ ! -e "$target_name" && ! -L "$target_name" ]] || return 74
     actual=''
     stage_status=0
@@ -1106,7 +1294,6 @@ stage_backup_target() (
     fi
     [[ -n "$actual" ]] || return 74
     printf '%s\n' "$actual"
-    install_test_hook after_backup_stage "$target_path" "$actual" || return $?
     return "$stage_status"
 )
 
@@ -1139,16 +1326,19 @@ move_staged_backup() {
 }
 
 create_link_temp() (
-    local source=$1 target_path=$2 relative_path=$3 temp_path=$4 target_name temp_name identity
-    pin_apply_target_parent "$source" "$target_path" "$relative_path" 0 || return $?
+    local source=$1 target_path=$2 relative_path=$3 temp_path=$4 expected_parent_physical=$5 expected_parent_identity=$6
+    local target_name temp_name identity
+    pin_apply_target_parent "$source" "$target_path" "$relative_path" 0 "$expected_parent_physical" "$expected_parent_identity" || return $?
     target_name=${relative_path##*/}
     temp_name=${temp_path##*/}
     [[ ! -e "$target_name" && ! -L "$target_name" && ! -e "$temp_name" && ! -L "$temp_name" ]] || return 65
     install_test_hook before_link_temp "$target_path" "$temp_path" || return $?
     honor_pending_signal || return $?
+    publication_parent_matches_pin "$target_path" "$expected_parent_physical" "$expected_parent_identity" || return 65
     [[ ! -e "$target_name" && ! -L "$target_name" && ! -e "$temp_name" && ! -L "$temp_name" ]] || return 65
     safe_source "$source" || return 65
     ln -s -- "$source" "$temp_name" || return 74
+    publication_parent_matches_pin "$target_path" "$expected_parent_physical" "$expected_parent_identity" || return 74
     [[ -L "$temp_name" && "$(readlink "$temp_name")" == "$source" ]] || return 65
     identity=$(path_identity "$temp_name") || return 65
     printf '%s\n' "$identity"
@@ -1156,8 +1346,9 @@ create_link_temp() (
 
 publish_link_temp() (
     local source=$1 target_path=$2 relative_path=$3 temp_path=$4 expected_identity=$5 recovery_hint=$6
-    local target_name temp_name container_path actual status
-    pin_apply_target_parent "$source" "$target_path" "$relative_path" 0 || return $?
+    local expected_parent_physical=$7 expected_parent_identity=$8
+    local target_name temp_name container_path actual status actual_parent actual_parent_identity
+    pin_apply_target_parent "$source" "$target_path" "$relative_path" 0 "$expected_parent_physical" "$expected_parent_identity" || return $?
     target_name=${relative_path##*/}
     temp_name=${temp_path##*/}
     [[ -L "$temp_name" && "$(readlink "$temp_name")" == "$source" ]] || return 65
@@ -1165,43 +1356,51 @@ publish_link_temp() (
     [[ ! -e "$target_name" && ! -L "$target_name" ]] || return 65
     install_test_hook before_link_publish "$target_path" "$temp_path" || return $?
     honor_pending_signal || return $?
+    publication_parent_matches_pin "$target_path" "$expected_parent_physical" "$expected_parent_identity" || return 65
     [[ -L "$temp_name" && "$(path_identity "$temp_name")" == "$expected_identity" ]] || return 65
     [[ ! -e "$target_name" && ! -L "$target_name" ]] || return 65
     safe_source "$source" || return 65
     install_test_hook link_publish_after_check "$target_path" "$temp_path" "$recovery_hint" || return $?
     honor_pending_signal || return $?
+    publication_parent_matches_pin "$target_path" "$expected_parent_physical" "$expected_parent_identity" || return 65
     move_no_clobber_exact "$temp_name" "$target_name" || return 74
+    publication_parent_matches_pin "$target_path" "$expected_parent_physical" "$expected_parent_identity" || return 74
     actual=''
     status=0
     if [[ -d "$target_name" && ! -L "$target_name" ]]; then
         container_path="$target_name/$temp_name"
         if [[ -L "$container_path" && "$(path_identity "$container_path")" == "$expected_identity" ]]; then
-            actual="${target_path%/*}/$container_path"
+            actual="$(pwd -P)/$container_path"
         elif [[ -L "$temp_name" && "$(path_identity "$temp_name")" == "$expected_identity" ]]; then
             actual=$temp_path
         fi
         status=74
     elif [[ -L "$target_name" && "$(path_identity "$target_name")" == "$expected_identity" ]]; then
-        actual=$target_path
+        actual="$(pwd -P)/$target_name"
     elif [[ -L "$temp_name" && "$(path_identity "$temp_name")" == "$expected_identity" ]]; then
         actual=$temp_path
         status=74
     else
         return 74
     fi
-    printf '%s\n' "$actual"
+    actual_parent=$(physical_dir "${actual%/*}") || return 74
+    actual_parent_identity=$(path_identity "${actual%/*}") || return 74
+    printf '%s\t%s\t%s\n' "$actual" "$actual_parent" "$actual_parent_identity"
     [[ $status -eq 0 ]] || return "$status"
-    install_test_hook after_link_publish "$target_path" "$temp_path" || return $?
-    honor_pending_signal || return $?
 )
 
 apply_install_entry() {
-    local action=$1 source=$2 target_path=$3 relative_path=$4
+    local plan_index=$1 action=$2 source=$3 target_path=$4 relative_path=$5
     local fingerprint backup_path='' backup_stage='' backup_recovery='' stage_relative actual_stage stage_status
     local temp_path temp_relative link_recovery identity journal_index published_path publish_status actual_relative
+    local inspection parent_physical parent_identity actual_parent actual_parent_identity published_info
 
     state_cwd_matches_pin || return 74
-    fingerprint=$(inspect_install_entry "$action" "$source" "$target_path" "$relative_path") || return $?
+    inspection=$(inspect_install_entry "$action" "$source" "$target_path" "$relative_path") || return $?
+    IFS=$'\t' read -r fingerprint parent_physical parent_identity <<<"$inspection"
+    [[ -n "$fingerprint" && -n "$parent_physical" && -n "$parent_identity" ]] || return 65
+    PLAN_PARENT_PHYSICAL[$plan_index]=$parent_physical
+    PLAN_PARENT_IDENTITY[$plan_index]=$parent_identity
     if [[ "$action" == BACKUP ]]; then
         backup_path="$BACKUP_FILES/$relative_path"
         mkdir -p -- "$(dirname "$backup_path")" || return 74
@@ -1210,12 +1409,21 @@ apply_install_entry() {
         backup_stage="${target_path%/*}/.dotfiles-backup-$$-$journal_index"
         backup_recovery="${target_path%/*}/.dotfiles-backup-recovery-$$-$journal_index"
         stage_relative=$(sibling_relative_path "$relative_path" "${backup_stage##*/}") || return 74
-        journal_move "$relative_path" "$target_path" "$backup_path" "$fingerprint" "$backup_stage" "$stage_relative" || return $?
-        actual_stage=$(stage_backup_target "$source" "$target_path" "$relative_path" "$backup_stage" "$backup_recovery" "$fingerprint")
+        journal_move "$relative_path" "$target_path" "$backup_path" "$fingerprint" "$backup_stage" "$stage_relative" \
+            "$parent_physical" "$parent_identity" || return $?
+        PLAN_BACKUP_PATH[$plan_index]=$backup_path
+        PLAN_BACKUP_FINGERPRINT[$plan_index]=$fingerprint
+        actual_stage=$(stage_backup_target "$source" "$target_path" "$relative_path" "$backup_stage" "$backup_recovery" \
+            "$fingerprint" "$parent_physical" "$parent_identity")
         stage_status=$?
         if [[ -n "$actual_stage" ]]; then
             actual_relative=$(target_local_relative_path "$relative_path" "$target_path" "$actual_stage") || return 74
-            set_journal_aux_location "$journal_index" "$actual_stage" "$actual_relative"
+            actual_parent=$(physical_dir "${actual_stage%/*}") || return 74
+            actual_parent_identity=$(path_identity "${actual_stage%/*}") || return 74
+            set_journal_aux_location "$journal_index" "$actual_stage" "$actual_relative" "$actual_parent" "$actual_parent_identity"
+        fi
+        if [[ -n "$actual_stage" ]]; then
+            install_test_hook after_backup_stage "$target_path" "$actual_stage" || return $?
         fi
         honor_pending_signal || return $?
         [[ $stage_status -eq 0 ]] || return "$stage_status"
@@ -1227,17 +1435,24 @@ apply_install_entry() {
     temp_path="${target_path%/*}/.dotfiles-link-$$-$journal_index"
     link_recovery="${target_path%/*}/.dotfiles-link-recovery-$$-$journal_index"
     temp_relative=$(sibling_relative_path "$relative_path" "${temp_path##*/}") || return 74
-    journal_link "$relative_path" "$source" "$target_path" "$temp_path" "$temp_relative" || return $?
-    identity=$(create_link_temp "$source" "$target_path" "$relative_path" "$temp_path") || return $?
+    journal_link "$relative_path" "$source" "$target_path" "$temp_path" "$temp_relative" \
+        "$parent_physical" "$parent_identity" || return $?
+    identity=$(create_link_temp "$source" "$target_path" "$relative_path" "$temp_path" "$parent_physical" "$parent_identity") || return $?
     [[ -n "$identity" ]] || return 65
     set_journal_link_identity "$journal_index" "$identity"
     install_test_hook after_link_temp "$target_path" "$temp_path" "$identity" || return $?
     honor_pending_signal || return $?
-    published_path=$(publish_link_temp "$source" "$target_path" "$relative_path" "$temp_path" "$identity" "$link_recovery")
+    published_info=$(publish_link_temp "$source" "$target_path" "$relative_path" "$temp_path" "$identity" "$link_recovery" \
+        "$parent_physical" "$parent_identity")
     publish_status=$?
-    if [[ -n "$published_path" && "$published_path" != "$target_path" && "$published_path" != "$temp_path" ]]; then
+    IFS=$'\t' read -r published_path actual_parent actual_parent_identity <<<"$published_info"
+    if [[ -n "$published_path" ]]; then
         actual_relative=$(target_local_relative_path "$relative_path" "$target_path" "$published_path") || return 74
-        set_journal_extra_location "$journal_index" "$published_path" "$actual_relative"
+        set_journal_publication_location "$journal_index" "$published_path" "$actual_relative" "$actual_parent" "$actual_parent_identity"
+    fi
+    PLAN_PUBLISHED_IDENTITY[$plan_index]=$identity
+    if [[ $publish_status -eq 0 ]]; then
+        install_test_hook after_link_publish "$target_path" "$temp_path" || return $?
     fi
     honor_pending_signal || return $?
     [[ $publish_status -eq 0 ]] || return "$publish_status"
@@ -1245,7 +1460,19 @@ apply_install_entry() {
 }
 
 pin_rollback_target_parent() {
-    local target_path=$1 relative_path=$2 expected_root
+    local target_path=$1 relative_path=$2 expected_parent_physical=${3:-} expected_parent_identity=${4:-}
+    local expected_root parent physical identity
+    if [[ -n "$expected_parent_physical" && -n "$expected_parent_identity" ]]; then
+        install_root_name_matches_pin && pinned_install_names_match || return 2
+        parent=${target_path%/*}
+        [[ -d "$parent" && ! -L "$parent" ]] || return 2
+        cd -P -- "$parent" || return 2
+        physical=$(pwd -P) || return 2
+        identity=$(path_identity .) || return 2
+        [[ "$physical" == "$expected_parent_physical" && "$identity" == "$expected_parent_identity" ]] || return 2
+        path_within "$physical" "$INSTALL_ROOT_PHYSICAL" || return 2
+        return 0
+    fi
     TARGET_RELATIVE_PATH=$relative_path
     TARGET_ROOT_PHYSICAL=''
     safe_target "$target_path" || return 2
@@ -1269,8 +1496,9 @@ restore_local_stage_exact() {
 
 stage_rollback_link_path() (
     local source=$1 path=$2 path_relative=$3 stage_path=$4 expected_identity=$5 hook_event=$6
+    local expected_parent_physical=$7 expected_parent_identity=$8
     local name stage_name parent_before observed_identity
-    pin_rollback_target_parent "$path" "$path_relative" || return 2
+    pin_rollback_target_parent "$path" "$path_relative" "$expected_parent_physical" "$expected_parent_identity" || return 2
     name=${path##*/}
     [[ -e "$name" || -L "$name" ]] || return 0
     [[ -n "$expected_identity" ]] || return 2
@@ -1314,28 +1542,35 @@ move_local_stage_to_quarantine() {
 
 rollback_one_link_path() {
     local source=$1 path=$2 path_relative=$3 stage_path=$4 quarantine_path=$5 expected_identity=$6 hook_event=$7
+    local expected_parent_physical=$8 expected_parent_identity=$9
     [[ -n "$path" ]] || return 0
-    stage_rollback_link_path "$source" "$path" "$path_relative" "$stage_path" "$expected_identity" "$hook_event" || return $?
+    stage_rollback_link_path "$source" "$path" "$path_relative" "$stage_path" "$expected_identity" "$hook_event" \
+        "$expected_parent_physical" "$expected_parent_identity" || return $?
     move_local_stage_to_quarantine "$stage_path" "$quarantine_path"
 }
 
 rollback_link_entry() {
     local journal_index=$1 relative_path=$2 source=$3 target_path=$4 temp_path=$5 temp_relative=$6
-    local actual_path=$7 actual_relative=$8 expected_identity=$9
+    local publication_path=$7 publication_relative=$8 expected_identity=$9 parent_physical=${10} parent_identity=${11}
+    local publication_parent_physical=${12} publication_parent_identity=${13}
     local quarantine_dir target_dir temp_dir actual_dir entry_status status=0
     quarantine_dir="$QUARANTINE_ROOT/link-$journal_index"
     mkdir -p -- "$quarantine_dir" || return 1
     target_dir=${target_path%/*}
     temp_dir=${temp_path%/*}
-    rollback_one_link_path "$source" "$target_path" "$relative_path" "$target_dir/.dotfiles-rollback-final-$$-$journal_index" "$quarantine_dir/final" "$expected_identity" rollback_link_before_quarantine
+    rollback_one_link_path "$source" "$target_path" "$relative_path" "$target_dir/.dotfiles-rollback-final-$$-$journal_index" \
+        "$quarantine_dir/final" "$expected_identity" rollback_link_before_quarantine "$parent_physical" "$parent_identity"
     entry_status=$?
     [[ $entry_status -eq 0 ]] || status=$entry_status
-    rollback_one_link_path "$source" "$temp_path" "$temp_relative" "$temp_dir/.dotfiles-rollback-temp-$$-$journal_index" "$quarantine_dir/temp" "$expected_identity" ''
+    rollback_one_link_path "$source" "$temp_path" "$temp_relative" "$temp_dir/.dotfiles-rollback-temp-$$-$journal_index" \
+        "$quarantine_dir/temp" "$expected_identity" '' "$parent_physical" "$parent_identity"
     entry_status=$?
     [[ $entry_status -eq 0 ]] || status=$entry_status
-    if [[ -n "$actual_path" ]]; then
-        actual_dir=${actual_path%/*}
-        rollback_one_link_path "$source" "$actual_path" "$actual_relative" "$actual_dir/.dotfiles-rollback-actual-$$-$journal_index" "$quarantine_dir/actual" "$expected_identity" ''
+    if [[ -n "$publication_path" ]]; then
+        actual_dir=${publication_path%/*}
+        rollback_one_link_path "$source" "$publication_path" "$publication_relative" \
+            "$actual_dir/.dotfiles-rollback-actual-$$-$journal_index" "$quarantine_dir/actual" "$expected_identity" '' \
+            "$publication_parent_physical" "$publication_parent_identity"
         entry_status=$?
         [[ $entry_status -eq 0 ]] || status=$entry_status
     fi
@@ -1344,13 +1579,8 @@ rollback_link_entry() {
 
 publish_restore_stage() (
     local journal_index=$1 relative_path=$2 target_path=$3 stage_path=$4 expected_fingerprint=$5 backup_display=$6
-    local expected_root target_name stage_name container_path
-    TARGET_RELATIVE_PATH=$relative_path
-    TARGET_ROOT_PHYSICAL=''
-    safe_target "$target_path" || return 2
-    expected_root=$TARGET_ROOT_PHYSICAL
-    [[ -n "$expected_root" ]] || return 2
-    pin_existing_install_parent "$relative_path" "$expected_root" || return 2
+    local expected_parent_physical=$7 expected_parent_identity=$8 target_name stage_name container_path
+    pin_rollback_target_parent "$target_path" "$relative_path" "$expected_parent_physical" "$expected_parent_identity" || return 2
     target_name=${relative_path##*/}
     stage_name=${stage_path##*/}
     [[ "$(path_fingerprint "$stage_name")" == "$expected_fingerprint" ]] || return 2
@@ -1387,8 +1617,9 @@ return_restore_stage_to_backup() {
 
 move_local_backup_to_restore_stage() (
     local source_path=$1 source_relative=$2 restore_stage=$3 expected_fingerprint=$4
+    local expected_parent_physical=$5 expected_parent_identity=$6
     local source_name container_path
-    pin_rollback_target_parent "$source_path" "$source_relative" || return 2
+    pin_rollback_target_parent "$source_path" "$source_relative" "$expected_parent_physical" "$expected_parent_identity" || return 2
     source_name=${source_path##*/}
     [[ "$(path_fingerprint "$source_name")" == "$expected_fingerprint" ]] || return 2
     [[ ! -e "$restore_stage" && ! -L "$restore_stage" ]] || return 2
@@ -1406,6 +1637,7 @@ move_local_backup_to_restore_stage() (
 
 rollback_move_entry() {
     local journal_index=$1 relative_path=$2 target_path=$3 backup_path=$4 expected_fingerprint=$5 backup_stage=$6 stage_relative=$7
+    local parent_physical=$8 parent_identity=$9 aux_parent_physical=${10} aux_parent_identity=${11}
     local restore_stage backup_display backup_name container_path
     backup_display="$STATE_ROOT_PHYSICAL/$backup_path"
     restore_stage="${target_path%/*}/.dotfiles-restore-$$-$journal_index"
@@ -1425,12 +1657,14 @@ rollback_move_entry() {
     elif [[ -e "$backup_stage" || -L "$backup_stage" ]]; then
         [[ "$(path_fingerprint "$backup_stage")" == "$expected_fingerprint" ]] || return 2
         [[ ! -e "$restore_stage" && ! -L "$restore_stage" ]] || return 2
-        move_local_backup_to_restore_stage "$backup_stage" "$stage_relative" "$restore_stage" "$expected_fingerprint" || return 2
+        move_local_backup_to_restore_stage "$backup_stage" "$stage_relative" "$restore_stage" "$expected_fingerprint" \
+            "$aux_parent_physical" "$aux_parent_identity" || return 2
     else
         [[ -e "$target_path" || -L "$target_path" ]] && return 0
         return 2
     fi
-    publish_restore_stage "$journal_index" "$relative_path" "$target_path" "$restore_stage" "$expected_fingerprint" "$backup_display"
+    publish_restore_stage "$journal_index" "$relative_path" "$target_path" "$restore_stage" "$expected_fingerprint" \
+        "$backup_display" "$parent_physical" "$parent_identity"
     if [[ $? -eq 0 ]]; then
         return 0
     fi
@@ -1447,12 +1681,16 @@ rollback_transaction() {
             LINK)
                 rollback_link_entry "$i" "$relative_path" "${JOURNAL_FIRST[$i]}" "${JOURNAL_SECOND[$i]}" \
                     "${JOURNAL_AUX[$i]}" "${JOURNAL_AUX_RELATIVE[$i]}" \
-                    "${JOURNAL_EXTRA[$i]}" "${JOURNAL_EXTRA_RELATIVE[$i]}" "${JOURNAL_IDENTITY[$i]}"
+                    "${JOURNAL_PUBLICATION[$i]}" "${JOURNAL_PUBLICATION_RELATIVE[$i]}" "${JOURNAL_IDENTITY[$i]}" \
+                    "${JOURNAL_PARENT_PHYSICAL[$i]}" "${JOURNAL_PARENT_IDENTITY[$i]}" \
+                    "${JOURNAL_PUBLICATION_PARENT_PHYSICAL[$i]}" "${JOURNAL_PUBLICATION_PARENT_IDENTITY[$i]}"
                 entry_status=$?
                 ;;
             MOVE)
                 rollback_move_entry "$i" "$relative_path" "${JOURNAL_FIRST[$i]}" "${JOURNAL_SECOND[$i]}" \
-                    "${JOURNAL_IDENTITY[$i]}" "${JOURNAL_AUX[$i]}" "${JOURNAL_AUX_RELATIVE[$i]}"
+                    "${JOURNAL_IDENTITY[$i]}" "${JOURNAL_AUX[$i]}" "${JOURNAL_AUX_RELATIVE[$i]}" \
+                    "${JOURNAL_PARENT_PHYSICAL[$i]}" "${JOURNAL_PARENT_IDENTITY[$i]}" \
+                    "${JOURNAL_AUX_PARENT_PHYSICAL[$i]}" "${JOURNAL_AUX_PARENT_IDENTITY[$i]}"
                 entry_status=$?
                 ;;
             *) entry_status=2 ;;
@@ -1502,13 +1740,13 @@ transaction_trap() {
 }
 
 start_transaction() {
-    select_transaction_move_style || return $?
     reset_transaction_journal || return $?
     TRANSACTION_START_DIR=$(pwd -P) || return 65
     TRANSACTION_ACTIVE=1
     trap transaction_trap EXIT
     trap 'record_transaction_signal 130' INT
     trap 'record_transaction_signal 143' TERM
+    pin_planned_install_root || return $?
     pin_state_root || return $?
     honor_pending_signal || return $?
     acquire_lock || return $?
@@ -1538,7 +1776,75 @@ apply_install_plan() {
         source=${PLAN_SOURCE[$i]}
         target_path=${PLAN_TARGET[$i]}
         relative_path=${PLAN_PATH[$i]}
-        apply_install_entry "$action" "$source" "$target_path" "$relative_path" || return $?
+        apply_install_entry "$i" "$action" "$source" "$target_path" "$relative_path" || return $?
+    done
+}
+
+verify_install_entry_postcondition() (
+    local i=$1 action=${PLAN_ACTION[$1]} source=${PLAN_SOURCE[$1]} target_path=${PLAN_TARGET[$1]}
+    local relative_path=${PLAN_PATH[$1]} expected_target_identity parent_physical parent_identity target_name
+    local backup_path backup_fingerprint
+    safe_source "$source" || { printf '%s: source safety proof lost\n' "$PROGRAM" >&2; return 65; }
+    [[ "$(path_identity "$source")" == "${PLAN_SOURCE_IDENTITY[$i]}" ]] || {
+        printf '%s: source identity changed\n' "$PROGRAM" >&2; return 65;
+    }
+    [[ "$(path_fingerprint "$source")" == "${PLAN_SOURCE_FINGERPRINT[$i]}" ]] || {
+        printf '%s: source fingerprint changed\n' "$PROGRAM" >&2; return 65;
+    }
+
+    case "$action" in
+        CREATE|BACKUP)
+            expected_target_identity=${PLAN_PUBLISHED_IDENTITY[$i]}
+            parent_physical=${PLAN_PARENT_PHYSICAL[$i]}
+            parent_identity=${PLAN_PARENT_IDENTITY[$i]}
+            ;;
+        NOOP)
+            expected_target_identity=${PLAN_TARGET_IDENTITY[$i]}
+            parent_physical=''
+            parent_identity=''
+            ;;
+        *) return 0 ;;
+    esac
+    [[ -n "$expected_target_identity" ]] || return 65
+
+    if [[ "$action" == BACKUP ]]; then
+        state_cwd_matches_pin || { printf '%s: pinned state location is unavailable\n' "$PROGRAM" >&2; return 74; }
+        backup_path=${PLAN_BACKUP_PATH[$i]}
+        backup_fingerprint=${PLAN_BACKUP_FINGERPRINT[$i]}
+        [[ -n "$backup_fingerprint" ]] || return 74
+        [[ "$(path_fingerprint "$backup_path")" == "$backup_fingerprint" ]] || {
+            printf '%s: backup fingerprint changed\n' "$PROGRAM" >&2; return 74;
+        }
+    fi
+
+    pin_apply_target_parent "$source" "$target_path" "$relative_path" 0 "$parent_physical" "$parent_identity" || {
+        printf '%s: publication parent proof lost\n' "$PROGRAM" >&2; return 65;
+    }
+    target_name=${relative_path##*/}
+    [[ -L "$target_name" ]] || { printf '%s: installed target is not a symlink\n' "$PROGRAM" >&2; return 65; }
+    [[ "$(readlink "$target_name")" == "$source" ]] || {
+        printf '%s: installed target points elsewhere\n' "$PROGRAM" >&2; return 65;
+    }
+    [[ "$(path_identity "$target_name")" == "$expected_target_identity" ]] || {
+        printf '%s: installed target identity changed\n' "$PROGRAM" >&2; return 65;
+    }
+    publication_parent_matches_pin "$target_path" "$parent_physical" "$parent_identity" || return 65
+)
+
+verify_install_postconditions() {
+    local i action status
+    install_root_name_matches_pin && pinned_install_names_match || return 65
+    state_cwd_matches_pin || return 74
+    for ((i=0; i<${#PLAN_ACTION[@]}; i++)); do
+        action=${PLAN_ACTION[$i]}
+        case "$action" in CREATE|BACKUP|NOOP) ;; *) continue ;; esac
+        verify_install_entry_postcondition "$i"
+        status=$?
+        if [[ $status -ne 0 ]]; then
+            printf '%s: final install postcondition failed for %s\n' "$PROGRAM" "${PLAN_PATH[$i]}" >&2
+            return "$status"
+        fi
+        install_root_name_matches_pin && pinned_install_names_match || return 65
     done
 }
 
@@ -1560,6 +1866,7 @@ command_install() {
         esac
         shift
     done
+    select_transaction_primitives || return $?
     build_install_plan "$backup" || return $?
     [[ $apply -eq 1 ]] || return 0
     start_transaction || return $?
@@ -1567,6 +1874,7 @@ command_install() {
         begin_backup || return $?
     fi
     apply_install_plan || return $?
+    verify_install_postconditions || return $?
     finish_transaction
 }
 

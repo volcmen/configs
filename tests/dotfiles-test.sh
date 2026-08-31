@@ -40,6 +40,9 @@ run_cli() {
         DOTFILES_TEST_OS_RELEASE="$test_os_release" \
         DOTFILES_TEST_FAIL_AFTER="${DOTFILES_TEST_FAIL_AFTER:-}" \
         DOTFILES_TEST_INSTALL_HOOK="${DOTFILES_TEST_INSTALL_HOOK:-}" \
+        DOTFILES_TEST_TRANSACTION_KERNEL="${DOTFILES_TEST_TRANSACTION_KERNEL:-}" \
+        DOTFILES_TEST_STAT_COMMAND="${DOTFILES_TEST_STAT_COMMAND:-}" \
+        DOTFILES_TEST_MOVE_COMMAND="${DOTFILES_TEST_MOVE_COMMAND:-}" \
         PATH="${DOTFILES_TEST_PATH:-$PATH}" \
         "$TEST_TMP/repo/bin/dotfiles" "$@" 2>&1)"; then
         CLI_STATUS=0
@@ -938,6 +941,318 @@ test_install_backup_blocks_directory_conflict() {
     assert_not_exists "$TEST_TMP/state/install.lock"
 }
 
+test_install_root_swap_back_cannot_false_succeed() {
+    local hook planned_sentinel foreign_sentinel
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'planned-root\n' >"$TEST_TMP/home/planned-root"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/root-swap-back"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = before_prepare_parent ] && [ ! -e "$TEST_TMP/root-replaced" ]; then
+    : >"$TEST_TMP/root-replaced"
+    /bin/mv "$TEST_TMP/home" "$TEST_TMP/home.planned"
+    /bin/mkdir "$TEST_TMP/home"
+    printf 'foreign-root\n' >"$TEST_TMP/home/foreign-root"
+elif [ "\$1" = link_publish_after_check ]; then
+    /bin/mv "$TEST_TMP/home" "$TEST_TMP/home.detached"
+    /bin/mv "$TEST_TMP/home.planned" "$TEST_TMP/home"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'root replacement/swap-back falsely succeeded' || return 1
+    planned_sentinel="$(find "$TEST_TMP" -maxdepth 2 -name planned-root -type f -print)"
+    foreign_sentinel="$(find "$TEST_TMP" -maxdepth 2 -name foreign-root -type f -print)"
+    [[ -n "$planned_sentinel" && "$(<"$planned_sentinel")" == planned-root ]] || return 1
+    [[ -n "$foreign_sentinel" && "$(<"$foreign_sentinel")" == foreign-root ]] || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/config"
+}
+
+test_install_nested_ancestor_swap_back_cannot_false_succeed() {
+    local hook planned_sentinel foreign_sentinel
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'planned-ancestor\n' >"$TEST_TMP/home/.config/planned-ancestor"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/ancestor-swap-back"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = before_prepare_parent ] && [ ! -e "$TEST_TMP/ancestor-replaced" ]; then
+    : >"$TEST_TMP/ancestor-replaced"
+    /bin/mv "$TEST_TMP/home/.config" "$TEST_TMP/home/.config.planned"
+    /bin/mkdir "$TEST_TMP/home/.config"
+    printf 'foreign-ancestor\n' >"$TEST_TMP/home/.config/foreign-ancestor"
+elif [ "\$1" = link_publish_after_check ]; then
+    /bin/mv "$TEST_TMP/home/.config" "$TEST_TMP/home/.config.detached"
+    /bin/mv "$TEST_TMP/home/.config.planned" "$TEST_TMP/home/.config"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'ancestor replacement/swap-back falsely succeeded' || return 1
+    planned_sentinel="$(find "$TEST_TMP/home" -maxdepth 3 -name planned-ancestor -type f -print)"
+    foreign_sentinel="$(find "$TEST_TMP/home" -maxdepth 3 -name foreign-ancestor -type f -print)"
+    [[ -n "$planned_sentinel" && "$(<"$planned_sentinel")" == planned-ancestor ]] || return 1
+    [[ -n "$foreign_sentinel" && "$(<"$foreign_sentinel")" == foreign-ancestor ]] || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/config"
+}
+
+test_install_final_verification_rejects_changed_noop_without_deleting_arrival() {
+    local hook
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'create-source\n' >"$TEST_TMP/repo/home/.config/demo/create"
+    printf 'noop-source\n' >"$TEST_TMP/repo/home/.config/demo/noop"
+    ln -s "$TEST_TMP/repo/home/.config/demo/noop" "$TEST_TMP/home/.config/demo/noop"
+    write_manifest $'demo|macos|file|.config/demo/create|plain|yes|1\ndemo|macos|file|.config/demo/noop|plain|yes|1'
+    hook="$TEST_TMP/change-noop-after-publication"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = after_link_publish ]; then
+    /bin/rm "$TEST_TMP/home/.config/demo/noop"
+    printf 'foreign-arrival\n' >"$TEST_TMP/home/.config/demo/noop"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'changed NOOP row falsely succeeded' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/create" || return 1
+    [[ -f "$TEST_TMP/home/.config/demo/noop" && ! -L "$TEST_TMP/home/.config/demo/noop" ]] || return 1
+    [[ "$(<"$TEST_TMP/home/.config/demo/noop")" == foreign-arrival ]]
+}
+
+test_install_final_verification_accepts_mixed_create_backup_and_noop() {
+    local backup
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'create-source\n' >"$TEST_TMP/repo/home/.config/demo/create"
+    printf 'backup-source\n' >"$TEST_TMP/repo/home/.config/demo/backup"
+    printf 'noop-source\n' >"$TEST_TMP/repo/home/.config/demo/noop"
+    printf 'backup-original\n' >"$TEST_TMP/home/.config/demo/backup"
+    ln -s "$TEST_TMP/repo/home/.config/demo/noop" "$TEST_TMP/home/.config/demo/noop"
+    write_manifest $'demo|macos|file|.config/demo/create|plain|yes|1\ndemo|macos|file|.config/demo/backup|plain|yes|1\ndemo|macos|file|.config/demo/noop|plain|yes|1'
+
+    run_cli install --apply --backup
+    assert_status 0 || return 1
+    [[ "$(readlink "$TEST_TMP/home/.config/demo/create")" == "$TEST_TMP/repo/home/.config/demo/create" ]] || return 1
+    [[ "$(readlink "$TEST_TMP/home/.config/demo/backup")" == "$TEST_TMP/repo/home/.config/demo/backup" ]] || return 1
+    [[ "$(readlink "$TEST_TMP/home/.config/demo/noop")" == "$TEST_TMP/repo/home/.config/demo/noop" ]] || return 1
+    backup="$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/backup' -type f -print)"
+    [[ -n "$backup" && "$(<"$backup")" == backup-original ]]
+}
+
+test_install_final_verification_revalidates_source_and_rolls_back() {
+    local hook
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/outside"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'foreign-source\n' >"$TEST_TMP/outside/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/replace-source-after-publication"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = after_link_publish ]; then
+    /bin/rm "$TEST_TMP/repo/home/.config/demo/config"
+    /bin/ln -s "$TEST_TMP/outside/config" "$TEST_TMP/repo/home/.config/demo/config"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'unsafe source replacement falsely succeeded' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/config" || return 1
+    [[ -L "$TEST_TMP/repo/home/.config/demo/config" ]] || return 1
+    [[ "$(readlink "$TEST_TMP/repo/home/.config/demo/config")" == "$TEST_TMP/outside/config" ]] || return 1
+    [[ "$(<"$TEST_TMP/outside/config")" == foreign-source ]]
+}
+
+test_install_final_verification_revalidates_backup_without_deleting_foreign_data() {
+    local hook backup owned
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'original\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/replace-backup-after-publication"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = after_link_publish ]; then
+    backup=\$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config' -type f -print)
+    /bin/mv "\$backup" "\$backup.owned"
+    printf 'foreign-backup\n' >"\$backup"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'changed backup outcome falsely succeeded' || return 1
+    assert_contains 'ROLLBACK_REFUSED .config/demo/config' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/config" || return 1
+    backup="$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config' -type f -print)"
+    owned="$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config.owned' -type f -print)"
+    [[ -n "$backup" && "$(<"$backup")" == foreign-backup ]] || return 1
+    [[ -n "$owned" && "$(<"$owned")" == original ]]
+}
+
+test_install_production_ignores_path_and_test_primitive_overrides() {
+    local stub_bin status output
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/stub-bin"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    stub_bin="$TEST_TMP/stub-bin"
+    cat >"$stub_bin/stat" <<STUB
+#!/bin/sh
+: >"$TEST_TMP/path-stat-ran"
+exit 99
+STUB
+    cat >"$stub_bin/mv" <<STUB
+#!/bin/sh
+: >"$TEST_TMP/path-mv-ran"
+exit 99
+STUB
+    cat >"$stub_bin/override-stat" <<STUB
+#!/bin/sh
+: >"$TEST_TMP/override-stat-ran"
+exit 99
+STUB
+    cat >"$stub_bin/override-mv" <<STUB
+#!/bin/sh
+: >"$TEST_TMP/override-mv-ran"
+exit 99
+STUB
+    chmod +x "$stub_bin/stat" "$stub_bin/mv" "$stub_bin/override-stat" "$stub_bin/override-mv"
+
+    if output="$(HOME="$TEST_TMP/home" XDG_STATE_HOME="$TEST_TMP/state" \
+        DOTFILES_TEST_TRANSACTION_KERNEL=Linux \
+        DOTFILES_TEST_STAT_COMMAND="$stub_bin/override-stat" \
+        DOTFILES_TEST_MOVE_COMMAND="$stub_bin/override-mv" \
+        PATH="$stub_bin:/usr/bin:/bin" "$TEST_TMP/repo/bin/dotfiles" install --apply 2>&1)"; then
+        status=0
+    else
+        status=$?
+    fi
+    [[ "$status" -eq 0 ]] || fail "production primitive pinning failed with status $status: $output" || return 1
+    [[ "$(readlink "$TEST_TMP/home/.config/demo/config")" == "$TEST_TMP/repo/home/.config/demo/config" ]] || return 1
+    assert_not_exists "$TEST_TMP/path-stat-ran" || return 1
+    assert_not_exists "$TEST_TMP/path-mv-ran" || return 1
+    assert_not_exists "$TEST_TMP/override-stat-ran" || return 1
+    assert_not_exists "$TEST_TMP/override-mv-ran"
+}
+
+test_install_test_mode_exercises_bsd_and_gnu_primitive_arguments() {
+    local style stub_bin stat_log move_log
+    for style in bsd gnu; do
+        new_fixture
+        mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/stub-bin"
+        printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+        write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+        stub_bin="$TEST_TMP/stub-bin"
+        stat_log="$TEST_TMP/$style-stat-args"
+        move_log="$TEST_TMP/$style-move-args"
+        cat >"$stub_bin/stat" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >>"$stat_log"
+if [ "$style" = bsd ]; then
+    [ "\$1" = -f ] && [ "\$2" = %d:%i ] || exit 91
+    shift 2
+else
+    [ "\$1" = -c ] && [ "\$2" = %d:%i ] && [ "\$3" = -- ] || exit 92
+    shift 3
+fi
+exec /usr/bin/stat -f '%d:%i' "\$1"
+STUB
+        cat >"$stub_bin/mv" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >>"$move_log"
+if [ "$style" = bsd ]; then
+    [ "\$1" = -h ] && [ "\$2" = -n ] && [ "\$3" = -- ] || exit 93
+    shift 3
+else
+    [ "\$1" = -n ] && [ "\$2" = -T ] && [ "\$3" = -- ] || exit 94
+    shift 3
+fi
+exec /bin/mv -h -n -- "\$1" "\$2"
+STUB
+        chmod +x "$stub_bin/stat" "$stub_bin/mv"
+
+        if [[ "$style" == bsd ]]; then
+            DOTFILES_TEST_TRANSACTION_KERNEL=Darwin DOTFILES_TEST_STAT_COMMAND="$stub_bin/stat" \
+                DOTFILES_TEST_MOVE_COMMAND="$stub_bin/mv" run_cli install --apply
+        else
+            DOTFILES_TEST_TRANSACTION_KERNEL=Linux DOTFILES_TEST_STAT_COMMAND="$stub_bin/stat" \
+                DOTFILES_TEST_MOVE_COMMAND="$stub_bin/mv" run_cli install --apply
+        fi
+        assert_status 0 || return 1
+        [[ -s "$stat_log" && -s "$move_log" ]] || return 1
+    done
+}
+
+test_install_rejects_malformed_and_multiline_path_identities() {
+    local mode stub
+    for mode in malformed multiline; do
+        new_fixture
+        mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/stub-bin"
+        printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+        write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+        stub="$TEST_TMP/stub-bin/stat"
+        cat >"$stub" <<STUB
+#!/bin/sh
+if [ "$mode" = malformed ]; then
+    printf 'not-an-identity\n'
+else
+    printf '1:2\n3:4\n'
+fi
+STUB
+        chmod +x "$stub"
+
+        DOTFILES_TEST_TRANSACTION_KERNEL=Darwin DOTFILES_TEST_STAT_COMMAND="$stub" run_cli install --apply
+        [[ "$CLI_STATUS" -ne 0 ]] || fail "$mode identity was accepted" || return 1
+        assert_not_exists "$TEST_TMP/home/.config/demo/config" || return 1
+    done
+}
+
+test_install_gnu_stat_selector_avoids_literal_format_operand_collision() {
+    local stub move_stub
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/stub-bin"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    stub="$TEST_TMP/stub-bin/stat"
+    move_stub="$TEST_TMP/stub-bin/mv"
+    cat >"$stub" <<STUB
+#!/bin/sh
+if [ "\$1" = -f ]; then
+    printf 'literal-format-file\n9:9\n'
+    exit 0
+fi
+[ "\$1" = -c ] && [ "\$2" = %d:%i ] && [ "\$3" = -- ] || exit 95
+shift 3
+printf '%s\n' "\$*" >>"$TEST_TMP/gnu-stat-operands"
+exec /usr/bin/stat -f '%d:%i' "\$1"
+STUB
+    cat >"$move_stub" <<'STUB'
+#!/bin/sh
+[ "$1" = -n ] && [ "$2" = -T ] && [ "$3" = -- ] || exit 96
+shift 3
+exec /bin/mv -h -n -- "$1" "$2"
+STUB
+    chmod +x "$stub" "$move_stub"
+
+    DOTFILES_TEST_TRANSACTION_KERNEL=Linux DOTFILES_TEST_STAT_COMMAND="$stub" \
+        DOTFILES_TEST_MOVE_COMMAND="$move_stub" run_cli install --apply
+    assert_status 0 || return 1
+    [[ -s "$TEST_TMP/gnu-stat-operands" ]] || return 1
+    [[ "$(readlink "$TEST_TMP/home/.config/demo/config")" == "$TEST_TMP/repo/home/.config/demo/config" ]]
+}
+
 test_install_existing_lock_refuses_mutation() {
     new_fixture
     mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/state/install.lock"
@@ -1155,7 +1470,7 @@ exec /usr/bin/stat "$@"
 STUB
     chmod +x "$stub_path"
 
-    DOTFILES_TEST_PATH="$TEST_TMP/stub-bin:$PATH" run_cli install --apply
+    DOTFILES_TEST_STAT_COMMAND="$stub_path" run_cli install --apply
     assert_status 65 && assert_contains 'ROLLBACK_REFUSED .config/demo/config' || return 1
     temp="$(find "$TEST_TMP/home" -name '.dotfiles-link-*' -type l -print)"
     [[ -n "$temp" && "$(readlink "$temp")" == "$TEST_TMP/repo/home/.config/demo/config" ]] || return 1
@@ -1898,6 +2213,16 @@ run_test test_install_rejects_backup_without_apply_and_unknown_options
 run_test test_install_backup_preserves_regular_file_relative_path
 run_test test_install_backup_preserves_foreign_symlink
 run_test test_install_backup_blocks_directory_conflict
+run_test test_install_root_swap_back_cannot_false_succeed
+run_test test_install_nested_ancestor_swap_back_cannot_false_succeed
+run_test test_install_final_verification_rejects_changed_noop_without_deleting_arrival
+run_test test_install_final_verification_accepts_mixed_create_backup_and_noop
+run_test test_install_final_verification_revalidates_source_and_rolls_back
+run_test test_install_final_verification_revalidates_backup_without_deleting_foreign_data
+run_test test_install_production_ignores_path_and_test_primitive_overrides
+run_test test_install_test_mode_exercises_bsd_and_gnu_primitive_arguments
+run_test test_install_rejects_malformed_and_multiline_path_identities
+run_test test_install_gnu_stat_selector_avoids_literal_format_operand_collision
 run_test test_install_existing_lock_refuses_mutation
 run_test test_install_releases_lock_after_success_and_failure
 run_test test_install_backup_report_records_move_and_link_rows

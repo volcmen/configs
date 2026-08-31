@@ -138,6 +138,16 @@ and installed target. An unexpected failure during the same transaction
 triggers automatic rollback; a completed install is recovered manually from
 its backup set.
 
+Before an apply mutates state, it pins the physical identity of the effective
+home and every existing publication ancestor. It uses the physical host's
+system `stat` and exact-target, no-clobber `mv` dialect, records the actual
+publication location and identity, and verifies every planned `CREATE`,
+`BACKUP`, and `NOOP` plus its source and backup outcome before reporting
+success. If containment or ownership proof is lost, apply exits nonzero and
+rollback preserves foreign arrivals; transaction-owned artifacts may remain in
+the reported backup or quarantine for explicit recovery instead of being
+deleted without proof.
+
 For manual recovery:
 
 1. Stop using the affected application and inspect `report.tsv`.
