@@ -22,13 +22,26 @@ assert_status() { [[ "$CLI_STATUS" -eq "$1" ]] || fail "status $CLI_STATUS != $1
 assert_contains() { [[ "$CLI_OUTPUT" == *"$1"* ]] || fail "missing <$1>; output: $CLI_OUTPUT"; }
 assert_not_exists() { [[ ! -e "$1" && ! -L "$1" ]] || fail "unexpected path: $1"; }
 
+fixture_setup_fatal() {
+    local stage=$1
+    TEST_TMP=""
+    printf 'FAIL: unable to create isolated test fixture (%s)\n' "$stage" >&2
+    exit 73
+}
+
 new_fixture() {
-    cleanup
-    TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-test.XXXXXX")"
-    TEST_TMP="$(cd "$TEST_TMP" && pwd -P)"
-    mkdir -p "$TEST_TMP/repo/bin" "$TEST_TMP/repo/home" "$TEST_TMP/home"
-    cp "$PROJECT_ROOT/bin/dotfiles" "$TEST_TMP/repo/bin/dotfiles"
-    chmod +x "$TEST_TMP/repo/bin/dotfiles"
+    local fixture_tmp fixture_physical
+    cleanup || fixture_setup_fatal cleanup
+    TEST_TMP=""
+    fixture_tmp="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-test.XXXXXX")" || fixture_setup_fatal mktemp
+    [[ -n "$fixture_tmp" && -d "$fixture_tmp" ]] || fixture_setup_fatal mktemp
+    fixture_physical="$(cd "$fixture_tmp" && pwd -P)" || fixture_setup_fatal cd
+    [[ -n "$fixture_physical" && -d "$fixture_physical" ]] || fixture_setup_fatal cd
+    mkdir -p "$fixture_physical/repo/bin" "$fixture_physical/repo/home" "$fixture_physical/home" || \
+        fixture_setup_fatal mkdir
+    cp "$PROJECT_ROOT/bin/dotfiles" "$fixture_physical/repo/bin/dotfiles" || fixture_setup_fatal cp
+    chmod +x "$fixture_physical/repo/bin/dotfiles" || fixture_setup_fatal chmod
+    TEST_TMP=$fixture_physical
 }
 
 run_cli() {
@@ -3961,6 +3974,74 @@ test_focused_test_selection_rejects_unknown_names_and_runs_known_once() {
     [[ "$known_count" -eq 1 ]] || fail "test_help ran $known_count times: $output"
 }
 
+test_fixture_setup_failures_never_retarget_cleanup() {
+    local kind sandbox stub_bin output status
+    new_fixture
+
+    for kind in mktemp cd mkdir cp; do
+        sandbox="$TEST_TMP/harness-$kind"
+        stub_bin="$sandbox/stub-bin"
+        mkdir -p "$sandbox/tests" "$sandbox/bin" "$stub_bin"
+        cp "$PROJECT_ROOT/tests/dotfiles-test.sh" "$sandbox/tests/dotfiles-test.sh"
+        cp "$PROJECT_ROOT/bin/dotfiles" "$sandbox/bin/dotfiles"
+        printf 'preserve me\n' >"$sandbox/sentinel"
+        case "$kind" in
+            mktemp)
+                cat >"$stub_bin/mktemp" <<'STUB'
+#!/bin/sh
+exit 73
+STUB
+                ;;
+            cd)
+                cat >"$stub_bin/mktemp" <<STUB
+#!/bin/sh
+/bin/mkdir -p "$sandbox/inaccessible-fixture"
+/bin/chmod 000 "$sandbox/inaccessible-fixture"
+printf '%s\n' "$sandbox/inaccessible-fixture"
+STUB
+                ;;
+            mkdir)
+                cat >"$stub_bin/mktemp" <<STUB
+#!/bin/sh
+/bin/mkdir -p "$sandbox/fixture"
+printf '%s\n' "$sandbox/fixture"
+STUB
+                cat >"$stub_bin/mkdir" <<'STUB'
+#!/bin/sh
+exit 73
+STUB
+                ;;
+            cp)
+                cat >"$stub_bin/mktemp" <<STUB
+#!/bin/sh
+/bin/mkdir -p "$sandbox/fixture"
+printf '%s\n' "$sandbox/fixture"
+STUB
+                cat >"$stub_bin/cp" <<'STUB'
+#!/bin/sh
+exit 73
+STUB
+                ;;
+        esac
+        chmod +x "$stub_bin"/*
+
+        if output="$(cd "$sandbox" && PATH="$stub_bin:/usr/bin:/bin" \
+            /bin/bash "$sandbox/tests/dotfiles-test.sh" test_help 2>&1)"; then
+            status=0
+        else
+            status=$?
+        fi
+        if [[ "$kind" == cd && -d "$sandbox/inaccessible-fixture" ]]; then
+            /bin/chmod 700 "$sandbox/inaccessible-fixture" || return 1
+        fi
+        [[ "$status" -ne 0 ]] || fail "$kind fixture failure unexpectedly passed: $output" || return 1
+        [[ "$output" == *"unable to create isolated test fixture ($kind)"* ]] || \
+            fail "$kind fixture failure was not explicit: $output" || return 1
+        [[ "$(<"$sandbox/sentinel")" == 'preserve me' ]] || \
+            fail "$kind fixture failure retargeted cleanup outside its fixture" || return 1
+    done
+}
+
 test_documentation_records_operations_and_compatibility_evidence() {
     local readme="$PROJECT_ROOT/README.md"
     local audit="$PROJECT_ROOT/docs/compatibility/2026-08-30-platform-audit.md"
@@ -4162,6 +4243,7 @@ run_test test_hypridle_uses_lua_dpms_dispatch
 run_test test_waybar_uses_lua_workspace_dispatch_and_uwsm_logout
 run_test test_no_argument_selection_validation_passes_in_self_runner
 run_test test_focused_test_selection_rejects_unknown_names_and_runs_known_once
+run_test test_fixture_setup_failures_never_retarget_cleanup
 run_test test_dotfiles_copy_dispatches_portably
 run_test test_shared_terminal_behavior_is_canonical
 run_test test_shared_fish_yazi_and_fontconfig_are_portable
