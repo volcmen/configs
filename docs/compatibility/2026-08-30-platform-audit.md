@@ -133,7 +133,7 @@ Hyprland runtime behavior.
 | `home/.config/hypr/hyprland/rules.lua` | `393b6e0fe71d0b660ff7852ddc5cfeeab75e92985522e718d825ccb2ec3dce31` | `393b6e0fe71d0b660ff7852ddc5cfeeab75e92985522e718d825ccb2ec3dce31` |
 | `home/.config/hypr/hyprland/shared.lua` | `efaf26481d442ef1d9712b85d88b96d79cb107f90ba95320a1e6d426678a4efd` | `efaf26481d442ef1d9712b85d88b96d79cb107f90ba95320a1e6d426678a4efd` |
 
-## Arch runtime handoff
+## Arch static evidence summary
 
 The macOS Arch-target check returned success while honestly separating static
 and runtime evidence. Lua, shell, JSONC, and XML checks produced `STATIC PASS`
@@ -141,12 +141,11 @@ where tools were available. Hyprland session validation, Fuzzel, Mako,
 hypridle, hyprlock, hyprpaper, hyprsunset, and other native/session-sensitive
 checks remain `RUNTIME UNVERIFIED`.
 
-On the real Arch host, record the installed versions in the matrix, run the
-native checks, inspect `hyprctl configerrors`, and test the preserved behavior
-before replacing any `unverified` value. Static macOS evidence must never be
-promoted to an Arch runtime pass.
+This macOS result is only the static evidence feeding the operator gate below.
+It must never be promoted to an Arch runtime pass or used to replace an
+`unverified` installed version.
 
-## Real Arch/Hyprland handoff
+## Real Arch/Hyprland operator handoff
 
 `BLOCKED: real Arch/Hyprland runtime required`. Retain `RUNTIME UNVERIFIED`
 until an operator completes this gate in a real Hyprland session. First run the
@@ -161,6 +160,19 @@ hyprctl configerrors
 fuzzel --check-config --config="$PWD/home/.config/fuzzel/fuzzel.ini"
 zellij --config "$PWD/home/.config/zellij/config.kdl" setup --check
 ```
+
+The preview is accepted only when `detect` reports `arch`; `diff` and the dry-run
+`install` contain only expected Arch/shared deployment decisions and no
+macOS-only decisions; Fuzzel and Zellij both exit 0; and
+`hyprctl configerrors` is empty or contains only explicitly documented
+pre-existing errors. Every proposed drift, missing path, creation, or backup
+must be understood and accepted before applying.
+
+If a native validator fails, stop before apply. Add a failing regression test,
+make the smallest behavior-preserving correction in the exact owning file,
+rerun the validator, and commit that defect separately. Never change a binding,
+monitor, rule, timeout, color, spacing value, font, or animation value merely to
+silence an unrelated warning.
 
 Capture the observed versions, without replacing any `unverified` matrix value
 that was not observed:
@@ -179,13 +191,13 @@ uwsm --version
 
 Only after the preview is accepted, run
 `./bin/dotfiles install --apply --backup`; confirm it creates one recoverable
-backup set and performs no service or compositor action. Then confirm there are
-no new `hyprctl configerrors` and manually verify the existing app, clipboard,
-group, media, mouse, tiling, workspace, resize, and lock bindings; Waybar and
-its power menu; wallpaper, idle/DPMS/suspend, lock screen, blue-light,
-clipboard-history, launcher, portal, and notification behavior; Zellij
-`Alt 1..0`, `Alt d/u`, and clipboard; and Kitty theme/font/pager/search plus the
-Fish auto-start workflow.
+backup set, creates only the selected Arch/shared links, and performs no service
+or compositor action. Then confirm there are no new `hyprctl configerrors` and
+manually verify the existing app, clipboard, group, media, mouse, tiling,
+workspace, resize, and lock bindings; Waybar modules, style, and power menu;
+wallpaper, idle/DPMS/suspend, lock screen, blue-light, clipboard-history,
+launcher, portal, and notification behavior; Zellij `Alt 1..0`, `Alt d/u`, and
+clipboard; and Kitty theme/font/pager/search plus the Fish auto-start workflow.
 
 ## macOS adoption gate — 2026-08-31
 
