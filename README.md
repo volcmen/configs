@@ -133,19 +133,21 @@ ${XDG_STATE_HOME:-$HOME/.local/state}/dotfiles/backups/<UTC timestamp>-<pid>/
 
 Each set contains `files/`, preserving paths relative to `$HOME`, and a
 tab-separated `report.tsv`. `MOVE` rows record the relative path, original live
-target, and backup path. `LINK` rows record the relative path, canonical source,
-and installed target. An unexpected failure during the same transaction
-triggers automatic rollback; a completed install is recovered manually from
-its backup set.
+target, and identity-validated physical backup path. If that path can no longer
+be revalidated, the row records its identity as unavailable instead of naming a
+stale path. `LINK` rows record the relative path, canonical source, and installed
+target. An unexpected failure during the same transaction triggers automatic
+rollback; a completed install is recovered manually from its backup set.
 
 Before an apply mutates state, it pins the physical identity of the effective
 home and every existing publication ancestor. It uses the physical host's
 system `stat` and exact-target, no-clobber `mv` dialect, records the actual
-publication location and identity, and verifies every planned `CREATE`,
-`BACKUP`, and `NOOP` plus its source and backup outcome before reporting
-success. The backup `report.tsv` inode and exact expected rows are verified at
-the same terminal commit boundary, after every mutation-capable cleanup
-boundary and immediately before the transaction becomes committed. If
+publication location and identity, and requires a backup source to retain its
+inspected inode and fingerprint through staging and publication. It verifies
+every planned `CREATE`, `BACKUP`, and `NOOP` plus its source and backup outcome
+before reporting success. The backup `report.tsv` inode and exact expected rows
+are verified at the same terminal commit boundary, after every mutation-capable
+cleanup boundary and immediately before the transaction becomes committed. If
 containment or ownership proof is lost, apply exits nonzero and rollback uses
 the recorded physical parent and artifact identity, preserves foreign
 arrivals, and reports the last identity-validated recovery location rather

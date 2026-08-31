@@ -1074,7 +1074,7 @@ STUB
 }
 
 test_install_final_verification_revalidates_backup_without_deleting_foreign_data() {
-    local hook backup owned
+    local hook backup owned_identity
     new_fixture
     mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
     printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
@@ -1084,8 +1084,10 @@ test_install_final_verification_revalidates_backup_without_deleting_foreign_data
     cat >"$hook" <<STUB
 #!/bin/sh
 if [ "\$1" = after_link_publish ]; then
+    : >"$TEST_TMP/backup-sibling-relocation-reached"
     backup=\$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config' -type f -print)
     /bin/mv "\$backup" "\$backup.owned"
+    /usr/bin/stat -f '%d:%i' "\$backup.owned" >"$TEST_TMP/backup-sibling-owned-identity"
     printf 'foreign-backup\n' >"\$backup"
 fi
 STUB
@@ -1093,13 +1095,15 @@ STUB
 
     DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
     [[ "$CLI_STATUS" -ne 0 ]] || fail 'changed backup outcome falsely succeeded' || return 1
-    assert_contains 'ROLLBACK_REFUSED .config/demo/config' || return 1
-    assert_contains 'recorded recovery location=' || return 1
-    assert_not_exists "$TEST_TMP/home/.config/demo/config" || return 1
+    [[ -f "$TEST_TMP/backup-sibling-relocation-reached" ]] || fail 'backup sibling relocation hook was not reached' || return 1
+    owned_identity="$(<"$TEST_TMP/backup-sibling-owned-identity")"
+    [[ -f "$TEST_TMP/home/.config/demo/config" && ! -L "$TEST_TMP/home/.config/demo/config" ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/demo/config")" == "$owned_identity" ]] || return 1
+    [[ "$(<"$TEST_TMP/home/.config/demo/config")" == original ]] || return 1
     backup="$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config' -type f -print)"
-    owned="$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config.owned' -type f -print)"
     [[ -n "$backup" && "$(<"$backup")" == foreign-backup ]] || return 1
-    [[ -n "$owned" && "$(<"$owned")" == original ]]
+    [[ -z "$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config.owned' -type f -print)" ]] || return 1
+    [[ "$CLI_OUTPUT" != *"recorded recovery location=$backup"* ]]
 }
 
 test_install_cleanup_window_mutation_cannot_false_succeed() {
@@ -1345,10 +1349,42 @@ STUB
     [[ -f "$TEST_TMP/backup-stage-replacement-reached" ]] || fail 'backup stage replacement hook was not reached' || return 1
     recorded="$(<"$TEST_TMP/recorded-backup-stage")"
     identity="$(<"$TEST_TMP/recorded-backup-stage-identity")"
-    assert_contains "recorded recovery location=$recorded identity=$identity" || return 1
     [[ -f "$recorded" && "$(<"$recorded")" == foreign-stage ]] || return 1
-    [[ -f "$recorded.owned" && "$(<"$recorded.owned")" == original ]] || return 1
-    assert_not_exists "$TEST_TMP/home/.config/demo/config" || return 1
+    assert_not_exists "$recorded.owned" || return 1
+    [[ -f "$TEST_TMP/home/.config/demo/config" && ! -L "$TEST_TMP/home/.config/demo/config" ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/demo/config")" == "$identity" ]] || return 1
+    [[ "$(<"$TEST_TMP/home/.config/demo/config")" == original ]] || return 1
+    [[ "$CLI_OUTPUT" != *"recorded recovery location=$recorded"* ]] || return 1
+    [[ -z "$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config' -type f -print)" ]]
+}
+
+test_install_backup_source_same_fingerprint_new_inode_is_never_moved() {
+    local hook substitute_identity
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'same-payload\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/replace-backup-source-with-same-fingerprint"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = before_backup_stage ]; then
+    : >"$TEST_TMP/backup-source-substitution-reached"
+    /bin/mv -- "\$2" "\$2.pre-inspection-owned"
+    printf 'same-payload\n' >"\$2"
+    /usr/bin/stat -f '%d:%i' "\$2" >"$TEST_TMP/backup-source-substitute-identity"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'same-fingerprint substitute was treated as the inspected backup source' || return 1
+    [[ -f "$TEST_TMP/backup-source-substitution-reached" ]] || fail 'backup source substitution hook was not reached' || return 1
+    substitute_identity="$(<"$TEST_TMP/backup-source-substitute-identity")"
+    [[ -f "$TEST_TMP/home/.config/demo/config" && ! -L "$TEST_TMP/home/.config/demo/config" ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/demo/config")" == "$substitute_identity" ]] || return 1
+    [[ "$(<"$TEST_TMP/home/.config/demo/config")" == same-payload ]] || return 1
+    [[ "$(<"$TEST_TMP/home/.config/demo/config.pre-inspection-owned")" == same-payload ]] || return 1
     [[ -z "$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config' -type f -print)" ]]
 }
 
@@ -1403,6 +1439,131 @@ STUB
     [[ -f "$TEST_TMP/final-verification-reached" ]] || fail 'final verification signal hook was not reached' || return 1
     assert_not_exists "$TEST_TMP/home/.config/demo/config" || return 1
     assert_not_exists "$TEST_TMP/state/install.lock"
+}
+
+test_install_after_link_publish_root_detach_refreshes_owned_location() {
+    local hook quarantine
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/detach-root-after-late-link-hook"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = after_link_publish ]; then
+    : >"$TEST_TMP/late-link-root-detach-reached"
+    /bin/mv -- "$TEST_TMP/home" "$TEST_TMP/home.detached"
+    /bin/mkdir -- "$TEST_TMP/home"
+    printf 'foreign-root\n' >"$TEST_TMP/home/foreign-root"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'late link root detach falsely succeeded' || return 1
+    [[ -f "$TEST_TMP/late-link-root-detach-reached" ]] || fail 'late link root detach hook was not reached' || return 1
+    [[ "$(<"$TEST_TMP/home/foreign-root")" == foreign-root ]] || return 1
+    assert_not_exists "$TEST_TMP/home.detached/.config/demo/config" || return 1
+    quarantine="$(find "$TEST_TMP/state/transactions" -path '*/quarantine/link-*/actual' -type l -print)"
+    [[ -n "$quarantine" && "$(readlink "$quarantine")" == "$TEST_TMP/repo/home/.config/demo/config" ]]
+}
+
+test_install_after_backup_stage_nested_detach_refreshes_restore_location() {
+    local hook
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'original\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/detach-nested-parent-after-late-backup-stage"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = after_backup_stage ]; then
+    : >"$TEST_TMP/late-backup-stage-nested-detach-reached"
+    parent=\${3%/*}
+    /bin/mv -- "\$parent" "\$parent.detached"
+    /bin/mkdir -- "\$parent"
+    printf 'foreign-target\n' >"\$parent/config"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'late backup-stage nested detach falsely succeeded' || return 1
+    [[ -f "$TEST_TMP/late-backup-stage-nested-detach-reached" ]] || fail 'late backup-stage nested hook was not reached' || return 1
+    [[ -f "$TEST_TMP/home/.config/demo/config" && "$(<"$TEST_TMP/home/.config/demo/config")" == foreign-target ]] || return 1
+    [[ -f "$TEST_TMP/home/.config/demo.detached/config" && ! -L "$TEST_TMP/home/.config/demo.detached/config" ]] || return 1
+    [[ "$(<"$TEST_TMP/home/.config/demo.detached/config")" == original ]]
+}
+
+test_install_after_backup_move_state_detach_refreshes_report_and_publication() {
+    local hook backup backup_parent actual_backup report expected_row
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'original\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/detach-state-after-late-backup-hook"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = after_backup_move ]; then
+    : >"$TEST_TMP/late-backup-state-detach-reached"
+    /bin/mv -- "$TEST_TMP/state" "$TEST_TMP/state.after-backup"
+    /bin/mkdir -- "$TEST_TMP/state"
+    printf 'foreign-state\n' >"$TEST_TMP/state/foreign-state"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    assert_status 0 || return 1
+    [[ -f "$TEST_TMP/late-backup-state-detach-reached" ]] || fail 'late backup state detach hook was not reached' || return 1
+    [[ "$(<"$TEST_TMP/state/foreign-state")" == foreign-state ]] || return 1
+    backup="$(find "$TEST_TMP/state.after-backup/backups" -path '*/files/.config/demo/config' -type f -print)"
+    [[ -n "$backup" && "$(<"$backup")" == original ]] || return 1
+    backup_parent="$(cd "${backup%/*}" && /bin/pwd -P)" || return 1
+    actual_backup="$backup_parent/${backup##*/}"
+    report="$(find "$TEST_TMP/state.after-backup/backups" -name report.tsv -type f -print)"
+    expected_row="$(printf 'MOVE\t.config/demo/config\t%s\t%s' \
+        "$TEST_TMP/home/.config/demo/config" "$actual_backup")"
+    grep -Fqx "$expected_row" "$report" || return 1
+}
+
+test_install_last_precommit_mixed_nested_detach_reports_path_unavailable() {
+    local hook owned_identity foreign_identity quarantine
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/one" "$TEST_TMP/repo/home/.config/two" \
+        "$TEST_TMP/home/.config/one" "$TEST_TMP/home/.config/two"
+    printf 'one\n' >"$TEST_TMP/repo/home/.config/one/config"
+    printf 'two\n' >"$TEST_TMP/repo/home/.config/two/config"
+    write_manifest $'one|macos|file|.config/one/config|plain|yes|1\ntwo|macos|file|.config/two/config|plain|yes|1'
+    hook="$TEST_TMP/detach-one-mixed-parent-at-last-precommit"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = last_precommit ]; then
+    : >"$TEST_TMP/mixed-last-precommit-detach-reached"
+    /usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/two/config" >"$TEST_TMP/mixed-owned-identity"
+    /bin/mv -- "$TEST_TMP/home/.config/two" "$TEST_TMP/home/.config/two.detached"
+    /bin/mkdir -- "$TEST_TMP/home/.config/two"
+    printf 'foreign-two\n' >"$TEST_TMP/home/.config/two/config"
+    /usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/two/config" >"$TEST_TMP/mixed-foreign-identity"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'mixed last-precommit nested detach falsely succeeded' || return 1
+    [[ -f "$TEST_TMP/mixed-last-precommit-detach-reached" ]] || fail 'mixed last-precommit detach hook was not reached' || return 1
+    owned_identity="$(<"$TEST_TMP/mixed-owned-identity")"
+    foreign_identity="$(<"$TEST_TMP/mixed-foreign-identity")"
+    [[ "$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/two/config")" == "$foreign_identity" ]] || return 1
+    [[ "$(<"$TEST_TMP/home/.config/two/config")" == foreign-two ]] || return 1
+    [[ -L "$TEST_TMP/home/.config/two.detached/config" ]] || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$TEST_TMP/home/.config/two.detached/config")" == "$owned_identity" ]] || return 1
+    assert_contains "recovery path unavailable identity=$owned_identity" || return 1
+    [[ "$CLI_OUTPUT" != *"recorded recovery location=$TEST_TMP/home/.config/two/config"* ]] || return 1
+    quarantine="$(find "$TEST_TMP/state/transactions" -path '*/quarantine/link-*/actual' -type l -print)"
+    [[ -n "$quarantine" && "$(readlink "$quarantine")" == "$TEST_TMP/repo/home/.config/one/config" ]]
 }
 
 test_install_production_ignores_path_and_test_primitive_overrides() {
@@ -2086,7 +2247,7 @@ STUB
 }
 
 test_install_state_swap_after_check_keeps_pinned_backup() {
-    local hook backup
+    local hook backup backup_parent actual_backup report expected_row
     new_fixture
     mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo" "$TEST_TMP/outside-state"
     printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
@@ -2096,6 +2257,7 @@ test_install_state_swap_after_check_keeps_pinned_backup() {
     cat >"$hook" <<STUB
 #!/bin/sh
 if [ "\$1" = backup_move_after_state_check ]; then
+    : >"$TEST_TMP/state-detach-report-path-reached"
     /bin/mv "$TEST_TMP/state" "$TEST_TMP/state.pinned"
     /bin/ln -s "$TEST_TMP/outside-state" "$TEST_TMP/state"
 fi
@@ -2104,8 +2266,16 @@ STUB
 
     DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
     assert_status 0 || return 1
+    [[ -f "$TEST_TMP/state-detach-report-path-reached" ]] || fail 'state detach report-path hook was not reached' || return 1
     backup="$(find "$TEST_TMP/state.pinned/backups" -path '*/files/.config/demo/config' -type f -print)"
     [[ -n "$backup" && "$(<"$backup")" == existing ]] || return 1
+    backup_parent="$(cd "${backup%/*}" && /bin/pwd -P)" || return 1
+    actual_backup="$backup_parent/${backup##*/}"
+    report="$(find "$TEST_TMP/state.pinned/backups" -name report.tsv -type f -print)"
+    expected_row="$(printf 'MOVE\t.config/demo/config\t%s\t%s' \
+        "$TEST_TMP/home/.config/demo/config" "$actual_backup")"
+    [[ -n "$report" ]] || return 1
+    grep -Fqx "$expected_row" "$report" || fail "report did not name actual backup $actual_backup: $(<"$report")" || return 1
     assert_not_exists "$TEST_TMP/outside-state/install.lock" || return 1
     assert_not_exists "$TEST_TMP/outside-state/backups"
 }
@@ -2532,8 +2702,13 @@ run_test test_install_backup_post_move_nested_detach_restores_owned_backup
 run_test test_install_backup_stage_post_move_root_detach_restores_in_recorded_parent
 run_test test_install_backup_stage_post_move_nested_detach_restores_in_recorded_parent
 run_test test_install_backup_stage_replacement_is_not_published_or_deleted
+run_test test_install_backup_source_same_fingerprint_new_inode_is_never_moved
 run_test test_install_final_verification_rejects_replaced_report_without_deleting_arrival
 run_test test_install_signal_at_final_verification_rolls_back_before_commit
+run_test test_install_after_link_publish_root_detach_refreshes_owned_location
+run_test test_install_after_backup_stage_nested_detach_refreshes_restore_location
+run_test test_install_after_backup_move_state_detach_refreshes_report_and_publication
+run_test test_install_last_precommit_mixed_nested_detach_reports_path_unavailable
 run_test test_install_production_ignores_path_and_test_primitive_overrides
 run_test test_install_test_mode_exercises_bsd_and_gnu_primitive_arguments
 run_test test_install_rejects_malformed_and_multiline_path_identities
