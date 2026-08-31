@@ -143,10 +143,13 @@ home and every existing publication ancestor. It uses the physical host's
 system `stat` and exact-target, no-clobber `mv` dialect, records the actual
 publication location and identity, and verifies every planned `CREATE`,
 `BACKUP`, and `NOOP` plus its source and backup outcome before reporting
-success. If containment or ownership proof is lost, apply exits nonzero and
-rollback preserves foreign arrivals; transaction-owned artifacts may remain in
-the reported backup or quarantine for explicit recovery instead of being
-deleted without proof.
+success. The backup `report.tsv` inode and exact expected rows are verified at
+the same terminal commit boundary, after every mutation-capable cleanup
+boundary and immediately before the transaction becomes committed. If
+containment or ownership proof is lost, apply exits nonzero and rollback uses
+the recorded physical parent and artifact identity, preserves foreign
+arrivals, and reports the last identity-validated recovery location rather
+than deleting without proof.
 
 For manual recovery:
 
