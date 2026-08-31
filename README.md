@@ -163,8 +163,10 @@ to the same verified report inode and carry identical complete rows. This is
 durable recovery evidence if the public name is unlinked or replaced; it is not
 transaction scratch and is never removed during successful cleanup. On failure,
 `REPORT_RECOVERY` identifies that link's last identity-validated physical
-location. Location updates append records through the retained handle; they
-never reopen or truncate either report pathname.
+location. A still-valid pinned recovery name remains authoritative even if a
+renamed public-report sibling has the same inode. Location updates append
+records through the retained handle; they never reopen or truncate either
+report pathname.
 Hooks, primitive test seams, and non-writer filesystem children run with the
 report descriptor closed, so neither a hook nor a surviving descendant can
 modify or keep the handle alive. A failed or partial append leaves all earlier
@@ -173,10 +175,12 @@ complete recovery records intact and makes the transaction fail.
 After each no-clobber move, the pre-call source, destination, and nested
 destination identities are compared with all post-call candidates. The original
 source identity is located first, which distinguishes a moved outer directory
-from a no-op source that remains in place. If that identity is absent, only a
-single newly changed candidate can be treated as unowned; multiple plausible
-candidates are recorded as ambiguous and left untouched. Unexpected regular
-files, symlinks, and directories are restored no-clobber when possible;
+from a no-op source that remains in place. A no-op is valid only when that
+source remains and no candidate changed; a changed destination with a restored
+source is ambiguous and left untouched. If the original identity is absent,
+only a single newly changed candidate can be treated as unowned; multiple
+plausible candidates are recorded as ambiguous and left untouched. Unexpected
+regular files, symlinks, and directories are restored no-clobber when possible;
 otherwise they remain unowned, retain an identity-validated recovery location,
 and are never removed by rollback.
 

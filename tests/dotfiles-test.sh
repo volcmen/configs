@@ -1742,6 +1742,144 @@ STUB
     [[ "$CLI_OUTPUT" != *'identity=F:'* ]]
 }
 
+test_install_backup_target_stage_swap_back_changed_destination_is_ambiguous() {
+    local move_stub target staging recovery
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'original\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    target="$TEST_TMP/home/.config/demo/config"
+    move_stub="$TEST_TMP/mv-target-stage-swap-back"
+    cat >"$move_stub" <<STUB
+#!/bin/sh
+previous=
+source=
+destination=
+for argument in "\$@"; do
+    source=\$previous
+    previous=\$argument
+done
+destination=\$previous
+case "\$source:\$destination" in
+    config:.dotfiles-backup-*)
+        if [ ! -f "$TEST_TMP/target-stage-swap-back-reached" ]; then
+            : >"$TEST_TMP/target-stage-swap-back-reached"
+            /bin/mv -- "\$source" "\$destination"
+            /bin/mv -- "\$destination" "\$source"
+            printf 'foreign-stage-arrival\n' >"\$destination"
+        fi
+        ;;
+esac
+exec /bin/mv "\$@"
+STUB
+    chmod +x "$move_stub"
+
+    DOTFILES_TEST_MOVE_COMMAND="$move_stub" run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'target-to-stage swap-back falsely succeeded' || return 1
+    [[ -f "$TEST_TMP/target-stage-swap-back-reached" ]] || fail 'target-to-stage swap-back seam was not reached' || return 1
+    [[ -f "$target" && "$(<"$target")" == original ]] || fail 'restored source was not preserved' || return 1
+    staging="$(find "$TEST_TMP/home/.config/demo" -maxdepth 1 -name '.dotfiles-backup-*' -type f -print)"
+    [[ -n "$staging" && "$(<"$staging")" == foreign-stage-arrival ]] || \
+        fail 'changed stage arrival was not preserved' || return 1
+    assert_contains 'MOVE_AMBIGUOUS operation=backup_target_stage' || return 1
+    [[ "$CLI_OUTPUT" != *'MOVE_NOOP operation=backup_target_stage'* ]] || return 1
+    [[ "$CLI_OUTPUT" != *UNOWNED_DISPLACED* && "$CLI_OUTPUT" != *'identity=F:'* ]] || return 1
+    recovery="$(find "$TEST_TMP/state/backups" -name report-recovery.tsv -type f -print)"
+    [[ -n "$recovery" ]] || fail 'ambiguous target-to-stage move lost durable report evidence' || return 1
+    grep -Fq $'MOVE_AMBIGUOUS\tbackup_target_stage\t' "$recovery"
+}
+
+test_install_backup_publish_swap_back_changed_destination_is_ambiguous() {
+    local move_stub target backup recovery
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'original\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    target="$TEST_TMP/home/.config/demo/config"
+    move_stub="$TEST_TMP/mv-backup-publish-swap-back"
+    cat >"$move_stub" <<STUB
+#!/bin/sh
+previous=
+source=
+destination=
+for argument in "\$@"; do
+    source=\$previous
+    previous=\$argument
+done
+destination=\$previous
+case "\$source:\$destination" in
+    *.dotfiles-backup-*:config)
+        if [ ! -f "$TEST_TMP/backup-publish-swap-back-reached" ]; then
+            : >"$TEST_TMP/backup-publish-swap-back-reached"
+            /bin/mv -- "\$source" "\$destination"
+            /bin/mv -- "\$destination" "\$source"
+            printf 'foreign-backup-arrival\n' >"\$destination"
+        fi
+        ;;
+esac
+exec /bin/mv "\$@"
+STUB
+    chmod +x "$move_stub"
+
+    DOTFILES_TEST_MOVE_COMMAND="$move_stub" run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'stage-to-backup swap-back falsely succeeded' || return 1
+    [[ -f "$TEST_TMP/backup-publish-swap-back-reached" ]] || fail 'stage-to-backup swap-back seam was not reached' || return 1
+    [[ -f "$target" && "$(<"$target")" == original ]] || fail 'restored stage source was not rolled back' || return 1
+    backup="$(find "$TEST_TMP/state/backups" -path '*/files/.config/demo/config' -type f -print)"
+    [[ -n "$backup" && "$(<"$backup")" == foreign-backup-arrival ]] || \
+        fail 'changed backup arrival was not preserved' || return 1
+    assert_contains 'MOVE_AMBIGUOUS operation=backup_stage_publish' || return 1
+    [[ "$CLI_OUTPUT" != *'MOVE_NOOP operation=backup_stage_publish'* ]] || return 1
+    [[ "$CLI_OUTPUT" != *UNOWNED_DISPLACED* && "$CLI_OUTPUT" != *'identity=F:'* ]] || return 1
+    recovery="$(find "$TEST_TMP/state/backups" -name report-recovery.tsv -type f -print)"
+    [[ -n "$recovery" ]] || fail 'ambiguous backup publication lost durable report evidence' || return 1
+    grep -Fq $'MOVE_AMBIGUOUS\tbackup_stage_publish\t' "$recovery"
+}
+
+test_install_link_publish_swap_back_changed_destination_is_ambiguous() {
+    local move_stub target
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    target="$TEST_TMP/home/.config/demo/config"
+    move_stub="$TEST_TMP/mv-link-publish-swap-back"
+    cat >"$move_stub" <<STUB
+#!/bin/sh
+previous=
+source=
+destination=
+for argument in "\$@"; do
+    source=\$previous
+    previous=\$argument
+done
+destination=\$previous
+case "\$source:\$destination" in
+    .dotfiles-link-*:config)
+        if [ ! -f "$TEST_TMP/link-publish-swap-back-reached" ]; then
+            : >"$TEST_TMP/link-publish-swap-back-reached"
+            /bin/mv -- "\$source" "\$destination"
+            /bin/mv -- "\$destination" "\$source"
+            printf 'foreign-link-arrival\n' >"\$destination"
+        fi
+        ;;
+esac
+exec /bin/mv "\$@"
+STUB
+    chmod +x "$move_stub"
+
+    DOTFILES_TEST_MOVE_COMMAND="$move_stub" run_cli install --apply
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'temp-to-target swap-back falsely succeeded' || return 1
+    [[ -f "$TEST_TMP/link-publish-swap-back-reached" ]] || fail 'temp-to-target swap-back seam was not reached' || return 1
+    [[ -f "$target" && ! -L "$target" && "$(<"$target")" == foreign-link-arrival ]] || \
+        fail 'changed link destination was not preserved' || return 1
+    assert_contains 'MOVE_AMBIGUOUS operation=link_publish' || return 1
+    [[ "$CLI_OUTPUT" != *'MOVE_NOOP operation=link_publish'* ]] || return 1
+    [[ "$CLI_OUTPUT" != *PUBLICATION* && "$CLI_OUTPUT" != *UNOWNED_DISPLACED* && "$CLI_OUTPUT" != *'identity=F:'* ]]
+}
+
 test_install_backup_target_inside_mv_directory_with_same_named_child_is_ambiguous() {
     local move_stub target staging recovery
     new_fixture
@@ -2063,6 +2201,44 @@ STUB
     recovery_physical="$(cd "${recovery%/*}" && /bin/pwd -P)/${recovery##*/}"
     assert_contains "REPORT_RECOVERY location=$recovery_physical identity=$recovery_identity" || return 1
     [[ -f "$TEST_TMP/home/.config/demo/config" && "$(<"$TEST_TMP/home/.config/demo/config")" == original ]]
+}
+
+test_install_renamed_public_report_keeps_fixed_recovery_location() {
+    local hook recovery renamed recovery_identity recovery_physical
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'original\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    hook="$TEST_TMP/rename-public-report-after-link"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = after_link_publish ]; then
+    : >"$TEST_TMP/public-report-rename-reached"
+    /bin/mv -- "$TEST_TMP/state" "$TEST_TMP/state.detached"
+    /bin/mkdir -- "$TEST_TMP/state"
+    printf 'foreign-state\n' >"$TEST_TMP/state/foreign"
+    report=\$(find "$TEST_TMP/state.detached/backups" -name report.tsv -type f -print)
+    /bin/mv -- "\$report" "\$report.public-renamed"
+fi
+STUB
+    chmod +x "$hook"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'renamed public report falsely committed' || return 1
+    [[ -f "$TEST_TMP/public-report-rename-reached" ]] || fail 'public-report rename seam was not reached' || return 1
+    [[ -f "$TEST_TMP/state/foreign" && "$(<"$TEST_TMP/state/foreign")" == foreign-state ]] || return 1
+    recovery="$(find "$TEST_TMP/state.detached/backups" -name report-recovery.tsv -type f -print)"
+    renamed="$(find "$TEST_TMP/state.detached/backups" -name report.tsv.public-renamed -type f -print)"
+    [[ -n "$recovery" && -n "$renamed" ]] || fail 'report siblings were not retained' || return 1
+    recovery_identity="$(/usr/bin/stat -f '%d:%i' "$recovery")"
+    [[ "$recovery_identity" == "$(/usr/bin/stat -f '%d:%i' "$renamed")" ]] || return 1
+    recovery_physical="$(cd "${recovery%/*}" && /bin/pwd -P)/${recovery##*/}"
+    grep -Fq $'MOVE_INTENT\t.config/demo/config\t' "$recovery" || return 1
+    grep -Fq $'MOVE_FINAL\t.config/demo/config\t' "$recovery" || return 1
+    grep -Fq $'LINK\t.config/demo/config\t' "$recovery" || return 1
+    assert_contains "REPORT_RECOVERY location=$recovery_physical identity=$recovery_identity" || return 1
+    [[ "$CLI_OUTPUT" != *"REPORT_RECOVERY path unavailable identity=$recovery_identity"* ]]
 }
 
 test_install_recovery_hardlink_directory_arrival_is_untouched() {
@@ -3568,6 +3744,9 @@ run_test test_install_link_publish_pre_syscall_swap_retains_unowned_inode
 run_test test_install_backup_target_inside_mv_swap_restores_actual_inode
 run_test test_install_backup_publish_inside_mv_swap_restores_actual_inode
 run_test test_install_link_publish_inside_mv_swap_restores_actual_inode
+run_test test_install_backup_target_stage_swap_back_changed_destination_is_ambiguous
+run_test test_install_backup_publish_swap_back_changed_destination_is_ambiguous
+run_test test_install_link_publish_swap_back_changed_destination_is_ambiguous
 run_test test_install_backup_target_inside_mv_directory_with_same_named_child_is_ambiguous
 run_test test_install_bsd_no_clobber_directory_with_nested_entry_is_noop
 run_test test_install_inside_mv_ambiguous_replacement_preserves_all_arrivals
@@ -3576,6 +3755,7 @@ run_test test_install_final_verification_rejects_replaced_report_without_deletin
 run_test test_install_report_append_handle_does_not_write_foreign_replacement
 run_test test_install_partial_report_append_preserves_complete_intent
 run_test test_install_unlinked_public_report_survives_at_recovery_hardlink
+run_test test_install_renamed_public_report_keeps_fixed_recovery_location
 run_test test_install_recovery_hardlink_directory_arrival_is_untouched
 run_test test_install_replaced_recovery_hardlink_fails_before_commit_and_reports_owned_location
 run_test test_install_hook_fd_is_closed_for_write_seek_and_surviving_descendant

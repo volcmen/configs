@@ -1113,13 +1113,15 @@ move_no_clobber_exact() {
                 expected_new_arrival=1
             fi
         done
-        if [[ $expected_new_arrival -eq 0 ]]; then
+        if [[ $expected_new_arrival -eq 0 && $changed_count -eq 0 ]]; then
             set_move_result_from_info "${actual_info[0]}"
             MOVE_RESULT_NOOP=1
             printf '%s: MOVE_NOOP operation=%s source=%s destination=%s; source remained in place\n' \
                 "$PROGRAM" "$operation" "$source" "$destination" >&2
             return 0
         fi
+        record_move_ambiguity "$operation" "$source" "$destination" || return 74
+        return 74
     fi
 
     if [[ $expected_count -eq 1 ]]; then
@@ -1339,6 +1341,7 @@ refresh_report_recovery_location() {
         "$previous_state_physical" "$STATE_ROOT_PHYSICAL") || return 74
     REPORT_RECOVERY_PARENT_PHYSICAL=$(path_with_replaced_prefix "$REPORT_RECOVERY_PARENT_PHYSICAL" \
         "$previous_state_physical" "$STATE_ROOT_PHYSICAL") || return 74
+    report_recovery_path_matches_pin && return 0
     info=$(locate_report_recovery_link) || info=''
     if [[ -z "$info" ]]; then
         REPORT_RECOVERY_PATH=''
