@@ -141,7 +141,10 @@ that escape either root. Comments begin with `#`; blank lines are ignored.
 
 The manifest records a reviewed version baseline, not an online “latest
 version.” Checks report installed and reviewed versions but never query package
-managers or mutate packages.
+managers or mutate packages. Installed versions come only from fixed
+application/argument pairs on the physical target. Missing, failed, or
+unparseable allowlisted probes report `unavailable`; off-platform and
+non-versioned artifacts report `not-applicable`.
 
 ## Host and Target Model
 
@@ -192,11 +195,20 @@ Runs ordered validation layers:
 4. native non-mutating application validation when the binary exists;
 5. runtime/session validation only when it is safe and meaningful.
 
+Before the validation result, each selected artifact emits exactly one
+machine-readable version row:
+
+```text
+VERSION <app> <path> reviewed=<manifest-version> installed=<version|unavailable|not-applicable>
+```
+
 Each result uses one of these explicit levels:
 
 - `PASS` — applicable native or complete validation passed;
 - `STATIC PASS` — source syntax passed off-platform;
 - `RUNTIME UNVERIFIED` — a real target session is still required;
+- `SKIPPED` — a manifest-optional canonical source is truly absent and remains
+  unverified without blocking independent work;
 - `DRIFT` — live state differs from the canonical source;
 - `BLOCKED` — a conflict, unsafe path, missing required prerequisite, or parse
   failure prevents progress.
@@ -204,12 +216,15 @@ Each result uses one of these explicit levels:
 The summary returns nonzero for syntax failures and blocked required artifacts.
 A missing native application binary produces `RUNTIME UNVERIFIED`; it is never
 reported as a passed validator and does not by itself block source deployment.
+An existing unsafe optional source, including a broken symlink, remains
+`BLOCKED`; `required=no` relaxes only true absence.
 
 ### `dotfiles diff`
 
 Read-only comparison classifies every selected artifact as:
 
-- missing target;
+- missing target, or a skipped/unverified optional artifact whose canonical
+  source is truly absent;
 - correct repository symlink;
 - symlink to another source;
 - regular-file content match;
@@ -236,7 +251,13 @@ Installation rules:
    cloned at any location.
 8. Never replace regular files or foreign symlinks without `--backup`.
 9. Never move a directory/type conflict automatically, even with `--backup`.
-10. Never run package, service, session, shell, or reload commands.
+10. Never run package installation, service, session, login-shell, or reload
+    commands.
+
+Install preflight uses only the candidate-file validator registry. A validator
+failure blocks preview and apply before home or state mutation; validator
+status 125 is emitted as `RUNTIME UNVERIFIED` and is nonblocking. Runtime and
+live-session probes belong to `check` and are never called by install.
 
 `install --apply --backup` moves approved regular-file and foreign-symlink
 conflicts to:

@@ -56,13 +56,33 @@ eligibility.
 ```
 
 `check` validates the manifest, source safety, syntax, and available native
-validators. Its confidence labels are deliberately distinct:
+validators. For every selected artifact it first prints one stable version row:
+
+```text
+VERSION <app> <path> reviewed=<manifest-version> installed=<observed-version|unavailable|not-applicable>
+```
+
+The reviewed value comes directly from `dotfiles.manifest`. Installed versions
+are observed only on the physical target through a fixed application/argument
+allowlist; `check` never evaluates manifest text or queries Homebrew, Pacman, or
+another package manager. `unavailable` means an allowlisted version command
+was missing, failed, or returned no recognizable version. `not-applicable`
+means the target is off-platform or the artifact has no allowlisted version
+probe.
+
+Validation confidence labels are deliberately distinct:
 
 - `PASS`: applicable validation ran on the physical host.
 - `STATIC PASS`: off-platform syntax or structure passed.
 - `RUNTIME UNVERIFIED`: a native binary, safe candidate-file check, or real
   session is still required.
+- `SKIPPED`: a manifest-optional canonical source is truly absent, so that
+  artifact remains unverified but does not block the command.
 - `BLOCKED`: an unsafe source or actual validation failure must be resolved.
+
+A missing `required=yes` source is blocked. `required=no` changes only the
+handling of true absence: an existing unsafe optional source, including a
+broken symlink, is still blocked.
 
 `--target` and `DOTFILES_TARGET=macos|arch` affect read-only validation only.
 They never authorize an install for another platform.
@@ -76,10 +96,14 @@ Inspect live drift and the complete installation plan before applying it:
 ./bin/dotfiles install
 ```
 
-`diff` classifies each selected path and may exit nonzero for ordinary drift.
-Plain `install` prints `CREATE`, `NOOP`, `CONFLICT`, `BACKUP`, or `BLOCKED`
-actions without writing anything. It validates the complete plan before any
-mutation.
+`diff` classifies each selected path and may exit nonzero for ordinary drift;
+it prints `SKIPPED` for a truly absent optional source. Plain `install` prints
+`CREATE`, `NOOP`, `CONFLICT`, `BACKUP`, `SKIPPED`, or `BLOCKED` actions without
+writing anything. It builds the complete plan and runs every selected safe
+source's candidate-file validator before any home or state mutation. A
+validator failure blocks preview and apply; status 125 is printed as
+`RUNTIME UNVERIFIED` and remains nonblocking. Install never runs live-session
+or runtime probes.
 
 Apply only after reviewing the plan:
 
@@ -146,6 +170,10 @@ reviewed, not an online latest release. Package upgrades are always manual:
    smallest behavior-preserving edit, and run the native validator.
 4. Update `tested_version` only after that evidence exists, then run
    `bash tests/dotfiles-test.sh` and `./bin/dotfiles check`.
+
+Review the resulting `VERSION` rows as local evidence, not as an online latest
+version check. `unavailable` and `not-applicable` must remain explicit until an
+operator safely observes the corresponding installed binary.
 
 The vendored Yazi recycle-bin plugin follows the same deliberate review flow;
 it is never fetched or updated automatically.

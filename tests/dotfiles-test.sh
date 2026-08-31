@@ -377,6 +377,97 @@ test_check_never_executes_manifest_validator_text() {
         assert_not_exists "$TEST_TMP/manifest-executed"
 }
 
+test_check_missing_source_uses_required_semantics() {
+    new_fixture
+    write_manifest 'optional|macos|file|.config/demo/optional|plain|no|1'
+    run_cli check --target macos
+    assert_status 0 && \
+        assert_contains 'SKIPPED optional .config/demo/optional: optional canonical source is absent; validation unverified' || return 1
+
+    new_fixture
+    write_manifest 'required|macos|file|.config/demo/required|plain|yes|1'
+    run_cli check --target macos
+    assert_status 1 && \
+        assert_contains 'BLOCKED required .config/demo/required: required canonical source is absent' || return 1
+
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/outside"
+    ln -s "$TEST_TMP/outside/missing" "$TEST_TMP/repo/home/.config/demo/unsafe"
+    write_manifest 'optional|macos|file|.config/demo/unsafe|plain|no|1'
+    run_cli check --target macos
+    assert_status 1 && \
+        assert_contains 'BLOCKED optional .config/demo/unsafe: canonical source is unsafe'
+}
+
+test_check_reports_reviewed_and_safe_installed_versions() {
+    local version_bin reviewed
+    new_fixture
+    version_bin="$TEST_TMP/version-bin"
+    reviewed='v1;touch$IFS'"$TEST_TMP"'/manifest-version-executed'
+    mkdir -p "$version_bin" "$TEST_TMP/repo/home/.config/demo"
+    printf 'set demo true\n' >"$TEST_TMP/repo/home/.config/demo/fish"
+    printf 'safe\n' >"$TEST_TMP/repo/home/.config/demo/zellij"
+    printf 'safe\n' >"$TEST_TMP/repo/home/.config/demo/demo"
+    printf 'safe\n' >"$TEST_TMP/repo/home/.config/demo/brew"
+    write_manifest "fish|macos|file|.config/demo/fish|fish|yes|$reviewed
+zellij|macos|file|.config/demo/zellij|plain|yes|0.45.1
+demo|macos|file|.config/demo/demo|plain|yes|7
+brew|macos|file|.config/demo/brew|plain|yes|8"
+    cat >"$version_bin/fish" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >>"$TEST_TMP/fish-calls"
+case "\$1" in
+    --version) printf 'fish, version 9.8.7\n'; exit 0 ;;
+    -n) exit 0 ;;
+esac
+exit 9
+STUB
+    for command in brew pacman; do
+        cat >"$version_bin/$command" <<STUB
+#!/bin/sh
+printf '%s %s\n' "$command" "\$*" >>"$TEST_TMP/package-manager-calls"
+exit 0
+STUB
+        chmod +x "$version_bin/$command"
+    done
+    chmod +x "$version_bin/fish"
+
+    DOTFILES_TEST_PATH="$version_bin:/usr/bin:/bin" run_cli check --target macos
+    assert_status 0 && \
+        assert_contains 'VERSION fish .config/demo/fish reviewed=v1;touch$IFS' && \
+        assert_contains 'installed=9.8.7' && \
+        assert_contains 'VERSION zellij .config/demo/zellij reviewed=0.45.1 installed=unavailable' && \
+        assert_contains 'VERSION demo .config/demo/demo reviewed=7 installed=not-applicable' && \
+        assert_contains 'VERSION brew .config/demo/brew reviewed=8 installed=not-applicable' || return 1
+    [[ "$(/usr/bin/grep -c '^--version$' "$TEST_TMP/fish-calls")" -eq 1 ]] || return 1
+    assert_not_exists "$TEST_TMP/manifest-version-executed" || return 1
+    assert_not_exists "$TEST_TMP/package-manager-calls"
+}
+
+test_check_version_observation_is_not_applicable_off_platform() {
+    local version_bin
+    new_fixture
+    version_bin="$TEST_TMP/version-bin"
+    mkdir -p "$version_bin" "$TEST_TMP/repo/home/.config/demo"
+    printf 'set demo true\n' >"$TEST_TMP/repo/home/.config/demo/fish"
+    write_manifest 'fish|arch|file|.config/demo/fish|fish|yes|4.8.1'
+    cat >"$version_bin/fish" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >>"$TEST_TMP/fish-calls"
+case "\$1" in
+    --version) printf 'fish, version 9.8.7\n'; exit 0 ;;
+    -n) exit 0 ;;
+esac
+exit 9
+STUB
+    chmod +x "$version_bin/fish"
+
+    DOTFILES_TEST_PATH="$version_bin:/usr/bin:/bin" run_cli check --target arch
+    assert_status 0 && \
+        assert_contains 'VERSION fish .config/demo/fish reviewed=4.8.1 installed=not-applicable' || return 1
+    [[ "$(/usr/bin/grep -c '^--version$' "$TEST_TMP/fish-calls")" -eq 0 ]]
+}
+
 test_diff_classifies_every_target_state() {
     local linked_source
     new_fixture
@@ -501,6 +592,28 @@ test_diff_blocks_unsafe_source_paths() {
         assert_contains 'BLOCKED demo .config/escaped-parent/config'
 }
 
+test_diff_missing_source_uses_required_semantics() {
+    new_fixture
+    write_manifest 'optional|macos|file|.config/demo/optional|plain|no|1'
+    run_cli diff
+    assert_status 0 && \
+        assert_contains 'SKIPPED optional .config/demo/optional: optional canonical source is absent; validation unverified' || return 1
+
+    new_fixture
+    write_manifest 'required|macos|file|.config/demo/required|plain|yes|1'
+    run_cli diff
+    assert_status 65 && \
+        assert_contains 'BLOCKED required .config/demo/required: required canonical source is absent' || return 1
+
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/outside"
+    ln -s "$TEST_TMP/outside/missing" "$TEST_TMP/repo/home/.config/demo/unsafe"
+    write_manifest 'optional|macos|file|.config/demo/unsafe|plain|no|1'
+    run_cli diff
+    assert_status 65 && \
+        assert_contains 'BLOCKED optional .config/demo/unsafe: canonical source is unsafe'
+}
+
 test_diff_blocks_unsafe_target_ancestors() {
     new_fixture
     mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/outside"
@@ -535,6 +648,115 @@ test_install_is_dry_run_by_default() {
     run_cli install
     assert_status 0 && assert_contains 'CREATE demo .config/demo/config' && \
         assert_not_exists "$TEST_TMP/home/.config/demo/config"
+}
+
+test_install_validator_failure_blocks_preview_and_apply_before_mutation() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo"
+    printf 'if then\n' >"$TEST_TMP/repo/home/.config/demo/bad.sh"
+    printf 'safe\n' >"$TEST_TMP/repo/home/.config/demo/good"
+    write_manifest $'shell-app|macos|file|.config/demo/bad.sh|shell|yes|1\nplain-app|macos|file|.config/demo/good|plain|yes|1'
+
+    run_cli install
+    assert_status 65 && \
+        assert_contains 'CREATE shell-app .config/demo/bad.sh' && \
+        assert_contains 'CREATE plain-app .config/demo/good' && \
+        assert_contains 'BLOCKED shell-app .config/demo/bad.sh:' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/bad.sh" || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/good" || return 1
+    assert_not_exists "$TEST_TMP/state" || return 1
+
+    run_cli install --apply
+    assert_status 65 && \
+        assert_contains 'CREATE shell-app .config/demo/bad.sh' && \
+        assert_contains 'CREATE plain-app .config/demo/good' && \
+        assert_contains 'BLOCKED shell-app .config/demo/bad.sh:' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/bad.sh" || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/good" || return 1
+    assert_not_exists "$TEST_TMP/state"
+}
+
+test_install_unavailable_validator_is_visible_and_nonblocking() {
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/kitty"
+    printf 'font_size 13\n' >"$TEST_TMP/repo/home/.config/kitty/kitty.conf"
+    write_manifest 'kitty|macos|file|.config/kitty/kitty.conf|kitty|yes|1'
+
+    run_cli install
+    assert_status 0 && \
+        assert_contains 'CREATE kitty .config/kitty/kitty.conf' && \
+        assert_contains 'RUNTIME UNVERIFIED kitty .config/kitty/kitty.conf: validator unavailable or intentionally unsafe on macos' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/kitty/kitty.conf" || return 1
+    assert_not_exists "$TEST_TMP/state" || return 1
+
+    run_cli install --apply
+    assert_status 0 && \
+        assert_contains 'CREATE kitty .config/kitty/kitty.conf' && \
+        assert_contains 'RUNTIME UNVERIFIED kitty .config/kitty/kitty.conf: validator unavailable or intentionally unsafe on macos' || return 1
+    [[ "$(readlink "$TEST_TMP/home/.config/kitty/kitty.conf")" == "$TEST_TMP/repo/home/.config/kitty/kitty.conf" ]]
+}
+
+test_install_runs_static_validator_without_runtime_probe() {
+    local validator_bin
+    new_fixture
+    validator_bin="$TEST_TMP/validator-bin"
+    mkdir -p "$validator_bin" "$TEST_TMP/repo/home/.config/hypr"
+    printf 'return {}\n' >"$TEST_TMP/repo/home/.config/hypr/hyprland.lua"
+    write_os_release 'ID=arch'
+    write_manifest 'hyprland|arch|file|.config/hypr/hyprland.lua|hyprland-lua|yes|1'
+    cat >"$validator_bin/luac" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >>"$TEST_TMP/luac-calls"
+exit 0
+STUB
+    cat >"$validator_bin/hyprctl" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >>"$TEST_TMP/hyprctl-calls"
+exit 0
+STUB
+    chmod +x "$validator_bin/luac" "$validator_bin/hyprctl"
+
+    DOTFILES_TEST_UNAME=Linux DOTFILES_TEST_OS_RELEASE="$TEST_TMP/os-release" \
+        DOTFILES_TEST_PATH="$validator_bin:/usr/bin:/bin" HYPRLAND_INSTANCE_SIGNATURE=active \
+        run_cli install --apply
+    assert_status 0 && assert_contains 'CREATE hyprland .config/hypr/hyprland.lua' || return 1
+    [[ -f "$TEST_TMP/luac-calls" && "$(wc -l <"$TEST_TMP/luac-calls")" -eq 1 ]] || return 1
+    assert_not_exists "$TEST_TMP/hyprctl-calls" || return 1
+    [[ "$(readlink "$TEST_TMP/home/.config/hypr/hyprland.lua")" == "$TEST_TMP/repo/home/.config/hypr/hyprland.lua" ]]
+}
+
+test_install_missing_source_uses_required_semantics() {
+    new_fixture
+    write_manifest 'optional|macos|file|.config/demo/optional|plain|no|1'
+    run_cli install
+    assert_status 0 && \
+        assert_contains 'SKIPPED optional .config/demo/optional: optional canonical source is absent; validation unverified' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/optional" || return 1
+    assert_not_exists "$TEST_TMP/state" || return 1
+    run_cli install --apply
+    assert_status 0 && \
+        assert_contains 'SKIPPED optional .config/demo/optional: optional canonical source is absent; validation unverified' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/optional" || return 1
+
+    new_fixture
+    write_manifest $'required|macos|file|.config/demo/required|plain|yes|1\noptional|macos|file|.config/demo/optional|plain|no|1'
+    run_cli install --apply
+    assert_status 65 && \
+        assert_contains 'BLOCKED required .config/demo/required: required canonical source is absent' && \
+        assert_contains 'SKIPPED optional .config/demo/optional: optional canonical source is absent; validation unverified' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/required" || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/optional" || return 1
+    assert_not_exists "$TEST_TMP/state" || return 1
+
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/outside"
+    ln -s "$TEST_TMP/outside/missing" "$TEST_TMP/repo/home/.config/demo/unsafe"
+    write_manifest 'optional|macos|file|.config/demo/unsafe|plain|no|1'
+    run_cli install --apply
+    assert_status 65 && \
+        assert_contains 'BLOCKED optional .config/demo/unsafe: canonical source is unsafe' || return 1
+    assert_not_exists "$TEST_TMP/home/.config/demo/unsafe" || return 1
+    assert_not_exists "$TEST_TMP/state"
 }
 
 test_install_apply_links_and_is_idempotent() {
@@ -1574,6 +1796,9 @@ run_test test_check_blocks_newline_only_hyprland_runtime_output
 run_test test_check_blocks_nul_only_hyprland_runtime_output
 run_test test_check_sanitizes_validator_control_diagnostics
 run_test test_check_never_executes_manifest_validator_text
+run_test test_check_missing_source_uses_required_semantics
+run_test test_check_reports_reviewed_and_safe_installed_versions
+run_test test_check_version_observation_is_not_applicable_off_platform
 run_test test_diff_classifies_every_target_state
 run_test test_diff_never_prints_binary_drift
 run_test test_diff_never_prints_non_nul_binary_drift
@@ -1583,9 +1808,14 @@ run_test test_diff_allows_read_only_cross_platform_staging
 run_test test_diff_rejects_live_home_as_cross_platform_staging
 run_test test_diff_fails_closed_without_canonical_source_root
 run_test test_diff_blocks_unsafe_source_paths
+run_test test_diff_missing_source_uses_required_semantics
 run_test test_diff_blocks_unsafe_target_ancestors
 run_test test_install_rejects_target_and_staging_options
 run_test test_install_is_dry_run_by_default
+run_test test_install_validator_failure_blocks_preview_and_apply_before_mutation
+run_test test_install_unavailable_validator_is_visible_and_nonblocking
+run_test test_install_runs_static_validator_without_runtime_probe
+run_test test_install_missing_source_uses_required_semantics
 run_test test_install_apply_links_and_is_idempotent
 run_test test_install_conflict_aborts_complete_plan
 run_test test_install_refuses_non_directory_parent

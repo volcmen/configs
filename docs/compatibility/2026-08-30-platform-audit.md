@@ -14,8 +14,15 @@ another host.
   not establish target runtime behavior.
 - `RUNTIME UNVERIFIED` means a required native binary, application-safe check,
   or real target session was unavailable. It is not a pass.
+- `SKIPPED` means a manifest-optional canonical source was truly absent. It is
+  nonblocking but remains unverified; unsafe optional paths are still blocked.
 - `BLOCKED` means an unsafe source, parse error, or validator failure prevents
   progress.
+
+Current `check` output also emits one `VERSION` row per selected artifact. Its
+reviewed value is the manifest baseline; its installed value comes from a
+fixed, non-package-manager command allowlist on the physical target or is the
+explicit fallback `unavailable`/`not-applicable`.
 
 ## Observed macOS baseline
 
