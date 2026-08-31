@@ -26,21 +26,26 @@ explicit fallback `unavailable`/`not-applicable`.
 
 ## Observed macOS baseline
 
-The following versions were observed on macOS on 2026-08-30. The source links
-are direct application or distribution documentation used for the compatibility
-review; they do not assert that the linked documentation's current release is
-the installed release.
+The baseline inventory was observed on macOS on 2026-08-30. The Git and
+Starship rows use the installed versions revalidated during the 2026-08-31
+live-adoption gate. The source links are direct application or distribution
+documentation used for the compatibility review; they do not assert that the
+linked documentation's current release is the installed release.
 
 | Observed application/version | Observation | Authoritative source |
 | --- | --- | --- |
 | Fish 4.8.1 | Installed version observed in the configured Fish environment. | [Fish 4.x release notes](https://fishshell.com/docs/4.4/relnotes.html) |
-| Git 2.55.0 | Homebrew Git; Apple Git may differ outside configured Fish. | — |
-| Starship 1.26.0 | Homebrew Starship; stale `/usr/local` Starship 1.25.1 remains shadowed. | — |
+| Git 2.50.1 / 2.55.0 | The fixed installed-version allowlist reported Apple Git 2.50.1; `/opt/homebrew/bin/git --version` reported Homebrew Git 2.55.0. | — |
+| Starship 1.25.1 / 1.26.0 | The manager's zsh-invoked fixed command probe reported `/usr/local/bin/starship` 1.25.1; adopted Fish resolves `/opt/homebrew/bin/starship` 1.26.0, matching the manifest review baseline. | — |
 | Kitty 0.47.2 | Installed macOS application version. | [Kitty configuration reference](https://sw.kovidgoyal.net/kitty/conf/) |
 | Zellij 0.45.1 | Installed version; its canonical KDL passed `setup --check`. | [Zellij configuration options](https://zellij.dev/documentation/options.html) |
 | Yazi 26.8.15 | Installed version; native per-OS keymap selectors are canonical. | [Yazi keymap reference](https://yazi-rs.github.io/docs/configuration/keymap/) |
 | mpv 0.41.0 | Installed version; this CLI has no safe native candidate-file validator. | — |
 | Fontconfig 2.18.3 | Installed version; both active XML files passed `xmllint`. | — |
+
+`Starship 1.26.0` is both the manifest-reviewed baseline and the installed
+Homebrew binary selected by adopted Fish. The separate `/usr/local` binary used
+by the manager's zsh probe is 1.25.1.
 
 ## Source and version matrix
 
@@ -236,7 +241,7 @@ wallpaper, idle/DPMS/suspend, lock screen, blue-light, clipboard-history,
 launcher, portal, and notification behavior; Zellij `Alt 1..0`, `Alt d/u`, and
 clipboard; and Kitty theme/font/pager/search plus the Fish auto-start workflow.
 
-## macOS adoption gate — 2026-08-31
+## macOS read-only pre-adoption gate — 2026-08-31
 
 This gate ran from the disposable
 `cross-platform-dotfiles-modernization` worktree and was deliberately
@@ -255,10 +260,43 @@ Linux-only-target filter (`hypr`, `waybar`, `fuzzel`, `mako`, `uwsm`,
 matches); the install side of that pipeline retained its expected conflict exit
 1.
 
-No `install --apply` command was run and this gate created no backup set. An
-apply from this checkout would create canonical absolute symlinks pointing into
-an ephemeral worktree, so live macOS adoption, backup creation, idempotence,
-and startup behavior are deferred until the reviewed branch is integrated into
-the persistent `/Users/david.david/Personal/github/configs` main checkout.
-Fish selection, Zellij and Starship validation against the live adopted links,
-and the required new Kitty window remain `RUNTIME UNVERIFIED`.
+No `install --apply` command was run during this pre-adoption gate, and this
+phase created no backup set. Applying from that checkout would have created
+canonical absolute symlinks pointing into an ephemeral worktree, so the gate
+deferred adoption until the reviewed branch was integrated into the persistent
+checkout. The following live-adoption gate resolved that deferral.
+
+## macOS live adoption — 2026-08-31
+
+The integrated `main` branch was adopted from the persistent
+`/Users/david.david/Personal/github/configs` checkout.
+`./bin/dotfiles install --apply --backup` exited 0 and created the recoverable
+backup set at
+`$HOME/.local/state/dotfiles/backups/20260831T190445Z-69466/`. Its
+`report.tsv` and `report-recovery.tsv` are hardlinks to the same 35-line report,
+and the set contains nine backed-up files. The install lock was removed after
+the transaction and the empty transactions container was pruned.
+
+Post-apply `./bin/dotfiles diff` exited 0 with 17 `LINKED` rows. A dry-run
+`./bin/dotfiles install` then exited 0 with 17 `NOOP` rows and the same five
+honest `RUNTIME UNVERIFIED` validator rows: Kitty (two files), mpv, and Yazi
+(two files). An explicit target audit confirmed that all 17 symlinks resolve to
+`/Users/david.david/Personal/github/configs/home/<relative path>`; none points
+into the disposable worktree.
+
+The live native gate passed Fish, Apple Git configuration, Homebrew Git
+configuration and version 2.55.0, Starship through `STARSHIP_CONFIG`, Zellij
+0.45.1, Bash, and the active Fontconfig XML. The gate's unqualified zsh
+`starship` validation used `/usr/local/bin/starship` 1.25.1. A follow-up
+validation passed the same adopted config with both that binary and
+`/opt/homebrew/bin/starship` 1.26.0; adopted Fish resolves the latter because
+its config prepends `/opt/homebrew/bin`. The config contains
+`command_timeout = 2000`, and the Fish-resolved 1.26.0 version matches the
+manifest review baseline. `./bin/dotfiles check --target macos` reported Apple
+Git 2.50.1 through the fixed installed-version allowlist, independently of the
+passing `/opt/homebrew/bin/git` 2.55.0 native gate.
+
+No package install or update, service reload, application reload, or live Arch
+apply occurred. Opening a new Kitty window remains an operator action. Real
+Arch/Hyprland behavior remains `RUNTIME UNVERIFIED` and must use the operator
+handoff above.
