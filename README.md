@@ -157,27 +157,33 @@ arrivals, and reports the last identity-validated recovery location rather
 than deleting without proof.
 
 The report is created without clobbering and retained by an open file handle for
-the whole transaction. A separately pinned hardlink under the transaction
-directory keeps the same report inode recoverable if the public name is
-unlinked. On failure, `REPORT_RECOVERY` identifies that link's last
-identity-validated physical location; on verified success the exact owned link
-is removed before transaction storage is pruned. Location updates append records
-through the retained handle; they never reopen or truncate the report pathname.
+the whole transaction. Each backup set permanently retains a separately pinned
+`report-recovery.tsv` hardlink beside its public `report.tsv`: both names refer
+to the same verified report inode and carry identical complete rows. This is
+durable recovery evidence if the public name is unlinked or replaced; it is not
+transaction scratch and is never removed during successful cleanup. On failure,
+`REPORT_RECOVERY` identifies that link's last identity-validated physical
+location. Location updates append records through the retained handle; they
+never reopen or truncate either report pathname.
 Hooks, primitive test seams, and non-writer filesystem children run with the
 report descriptor closed, so neither a hook nor a surviving descendant can
 modify or keep the handle alive. A failed or partial append leaves all earlier
 complete recovery records intact and makes the transaction fail.
 
-After each no-clobber move, ownership is classified from the stable inode and
-fingerprint actually present at the destination or source after the system call,
-not only from observations made before entering `mv`. Unexpected regular files,
-symlinks, and directories are restored no-clobber when possible; otherwise they
-remain unowned, retain an identity-validated recovery location, and are never
-removed by rollback.
+After each no-clobber move, the pre-call source, destination, and nested
+destination identities are compared with all post-call candidates. The original
+source identity is located first, which distinguishes a moved outer directory
+from a no-op source that remains in place. If that identity is absent, only a
+single newly changed candidate can be treated as unowned; multiple plausible
+candidates are recorded as ambiguous and left untouched. Unexpected regular
+files, symlinks, and directories are restored no-clobber when possible;
+otherwise they remain unowned, retain an identity-validated recovery location,
+and are never removed by rollback.
 
 For manual recovery:
 
-1. Stop using the affected application and inspect `report.tsv`.
+1. Stop using the affected application and inspect `report.tsv` or its permanent
+   same-inode companion `report-recovery.tsv`.
 2. For each `MOVE_INTENT`, use its last complete `MOVE_FINAL` row and verify that
    the current target is still the symlink
    recorded by its matching `LINK` row. If it changed after installation, stop

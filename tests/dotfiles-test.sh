@@ -44,6 +44,7 @@ run_cli() {
         DOTFILES_TEST_STAT_COMMAND="${DOTFILES_TEST_STAT_COMMAND:-}" \
         DOTFILES_TEST_MOVE_COMMAND="${DOTFILES_TEST_MOVE_COMMAND:-}" \
         DOTFILES_TEST_REPORT_PARTIAL_TYPE="${DOTFILES_TEST_REPORT_PARTIAL_TYPE:-}" \
+        DOTFILES_TEST_REPORT_FINAL_UNLINK="${DOTFILES_TEST_REPORT_FINAL_UNLINK:-}" \
         PATH="${DOTFILES_TEST_PATH:-$PATH}" \
         "$TEST_TMP/repo/bin/dotfiles" "$@" 2>&1)"; then
         CLI_STATUS=0
@@ -1741,6 +1742,142 @@ STUB
     [[ "$CLI_OUTPUT" != *'identity=F:'* ]]
 }
 
+test_install_backup_target_inside_mv_directory_with_same_named_child_is_ambiguous() {
+    local move_stub target staging recovery
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'original\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    target="$TEST_TMP/home/.config/demo/config"
+    move_stub="$TEST_TMP/mv-directory-with-same-named-child"
+    cat >"$move_stub" <<STUB
+#!/bin/sh
+previous=
+source=
+destination=
+for argument in "\$@"; do
+    source=\$previous
+    previous=\$argument
+done
+destination=\$previous
+case "\$source:\$destination" in
+    config:.dotfiles-backup-*)
+        if [ ! -f "$TEST_TMP/directory-child-inside-mv-consumed" ]; then
+            : >"$TEST_TMP/directory-child-inside-mv-consumed"
+            /bin/mv -- "\$source" "\$source.inside-expected"
+            /bin/mkdir -- "\$source"
+            printf 'foreign-nested-child\n' >"\$source/config"
+        fi
+        ;;
+esac
+exec /bin/mv "\$@"
+STUB
+    chmod +x "$move_stub"
+
+    DOTFILES_TEST_MOVE_COMMAND="$move_stub" run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'directory-with-child replacement falsely succeeded' || return 1
+    [[ -f "$TEST_TMP/directory-child-inside-mv-consumed" ]] || fail 'directory replacement seam was not reached' || return 1
+    staging="$(find "$TEST_TMP/home/.config/demo" -maxdepth 1 -name '.dotfiles-backup-*' -type d -print)"
+    [[ -n "$staging" && "$(<"$staging/config")" == foreign-nested-child ]] || \
+        fail 'unexpected nested child was moved or deleted' || return 1
+    [[ -f "$target.inside-expected" && "$(<"$target.inside-expected")" == original ]] || return 1
+    assert_contains 'MOVE_AMBIGUOUS operation=backup_target_stage' || return 1
+    [[ "$CLI_OUTPUT" != *UNOWNED_DISPLACED* ]] || fail 'ambiguous directory arrival was classified as one unowned candidate' || return 1
+    recovery="$(find "$TEST_TMP/state/backups" -name report-recovery.tsv -type f -print)"
+    [[ -n "$recovery" ]] || fail 'ambiguous move did not retain durable report evidence' || return 1
+    grep -Fq $'MOVE_AMBIGUOUS\tbackup_target_stage\t' "$recovery" || return 1
+}
+
+test_install_bsd_no_clobber_directory_with_nested_entry_is_noop() {
+    local hook move_stub target staging
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'original\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    target="$TEST_TMP/home/.config/demo/config"
+    hook="$TEST_TMP/create-preexisting-noclobber-destination"
+    cat >"$hook" <<STUB
+#!/bin/sh
+if [ "\$1" = move_before_syscall ] && [ "\$2" = backup_target_stage ]; then
+    : >"$TEST_TMP/noclobber-prestate-reached"
+    /bin/mkdir -- "\$4"
+    printf 'preexisting-nested-entry\n' >"\$4/config"
+fi
+STUB
+    chmod +x "$hook"
+    move_stub="$TEST_TMP/bsd-noclobber-leaves-source"
+    cat >"$move_stub" <<STUB
+#!/bin/sh
+if [ "\$1" = -h ] && [ "\$2" = -n ] && [ "\$3" = -- ] && \
+    [ "\$4" = config ] && [ "\${5#.dotfiles-backup-}" != "\$5" ]; then
+    exit 0
+fi
+exec /bin/mv "\$@"
+STUB
+    chmod +x "$move_stub"
+
+    DOTFILES_TEST_INSTALL_HOOK="$hook" DOTFILES_TEST_MOVE_COMMAND="$move_stub" \
+        run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'BSD no-clobber no-op falsely succeeded' || return 1
+    [[ -f "$TEST_TMP/noclobber-prestate-reached" ]] || fail 'BSD no-clobber prestate seam was not reached' || return 1
+    [[ -f "$target" && "$(<"$target")" == original ]] || fail 'no-op source was changed' || return 1
+    staging="$(find "$TEST_TMP/home/.config/demo" -maxdepth 1 -name '.dotfiles-backup-*' -type d -print)"
+    [[ -n "$staging" && "$(<"$staging/config")" == preexisting-nested-entry ]] || \
+        fail 'preexisting BSD destination nested entry changed' || return 1
+    assert_contains 'MOVE_NOOP operation=backup_target_stage' || return 1
+    [[ "$CLI_OUTPUT" != *UNOWNED_DISPLACED* ]] || fail 'BSD no-op was classified as an unowned displacement' || return 1
+}
+
+test_install_inside_mv_ambiguous_replacement_preserves_all_arrivals() {
+    local move_stub target staging recovery
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'original\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+    target="$TEST_TMP/home/.config/demo/config"
+    move_stub="$TEST_TMP/mv-ambiguous-replacement"
+    cat >"$move_stub" <<STUB
+#!/bin/sh
+previous=
+source=
+destination=
+for argument in "\$@"; do
+    source=\$previous
+    previous=\$argument
+done
+destination=\$previous
+case "\$source:\$destination" in
+    config:.dotfiles-backup-*)
+        if [ ! -f "$TEST_TMP/ambiguous-inside-mv-consumed" ]; then
+            : >"$TEST_TMP/ambiguous-inside-mv-consumed"
+            /bin/mv -- "\$source" "\$source.inside-expected"
+            printf 'foreign-source-arrival\n' >"\$source"
+            printf 'foreign-destination-arrival\n' >"\$destination"
+        fi
+        ;;
+esac
+exec /bin/mv "\$@"
+STUB
+    chmod +x "$move_stub"
+
+    DOTFILES_TEST_MOVE_COMMAND="$move_stub" run_cli install --apply --backup
+    [[ "$CLI_STATUS" -ne 0 ]] || fail 'ambiguous inside-mv replacement falsely succeeded' || return 1
+    [[ -f "$TEST_TMP/ambiguous-inside-mv-consumed" ]] || fail 'ambiguous replacement seam was not reached' || return 1
+    [[ -f "$target" && "$(<"$target")" == foreign-source-arrival ]] || return 1
+    staging="$(find "$TEST_TMP/home/.config/demo" -maxdepth 1 -name '.dotfiles-backup-*' -type f -print)"
+    [[ -n "$staging" && "$(<"$staging")" == foreign-destination-arrival ]] || \
+        fail 'ambiguous destination arrival changed' || return 1
+    [[ -f "$target.inside-expected" && "$(<"$target.inside-expected")" == original ]] || return 1
+    assert_contains 'MOVE_AMBIGUOUS operation=backup_target_stage' || return 1
+    [[ "$CLI_OUTPUT" != *UNOWNED_DISPLACED* ]] || fail 'ambiguous replacement was classified as one unowned candidate' || return 1
+    recovery="$(find "$TEST_TMP/state/backups" -name report-recovery.tsv -type f -print)"
+    [[ -n "$recovery" ]] || fail 'ambiguous replacement lost durable report evidence' || return 1
+    grep -Fq $'MOVE_AMBIGUOUS\tbackup_target_stage\t' "$recovery" || return 1
+}
+
 test_install_unowned_refresh_retains_file_symlink_and_directory_paths() {
     local kind hook target expected_identity substitute_identity displaced report expected_row
     for kind in file symlink directory; do
@@ -1918,7 +2055,7 @@ STUB
     [[ "$CLI_STATUS" -ne 0 ]] || fail 'unlinked public report falsely succeeded' || return 1
     [[ -f "$TEST_TMP/public-report-unlink-reached" ]] || fail 'public-report unlink seam was not reached' || return 1
     [[ -f "$TEST_TMP/state/foreign" && "$(<"$TEST_TMP/state/foreign")" == foreign-state ]] || return 1
-    recovery="$(find "$TEST_TMP/state.detached/transactions" -name report-recovery.tsv -type f -print)"
+    recovery="$(find "$TEST_TMP/state.detached/backups" -name report-recovery.tsv -type f -print)"
     [[ -n "$recovery" ]] || fail 'report recovery hardlink did not survive parent exit' || return 1
     grep -Fq $'MOVE_INTENT\t.config/demo/config\t' "$recovery" || fail 'durable report lost prior intent' || return 1
     grep -Fq $'MOVE_FINAL\t.config/demo/config\t' "$recovery" || fail 'durable report lost final-location evidence' || return 1
@@ -1949,7 +2086,7 @@ STUB
     DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
     [[ "$CLI_STATUS" -ne 0 ]] || fail 'recovery-link directory arrival falsely succeeded' || return 1
     [[ -f "$TEST_TMP/recovery-hardlink-directory-reached" ]] || fail 'recovery-link directory seam was not reached' || return 1
-    recovery_dir="$(find "$TEST_TMP/state/transactions" -name report-recovery.tsv -type d -print)"
+    recovery_dir="$(find "$TEST_TMP/state/backups" -name report-recovery.tsv -type d -print)"
     [[ -n "$recovery_dir" ]] || fail 'foreign recovery directory was removed' || return 1
     [[ -f "$recovery_dir/sentinel" && "$(<"$recovery_dir/sentinel")" == foreign-recovery-directory ]] || return 1
     nested_count="$(find "$recovery_dir" -mindepth 1 ! -name sentinel -print | wc -l | tr -d ' ')"
@@ -1969,7 +2106,7 @@ test_install_replaced_recovery_hardlink_fails_before_commit_and_reports_owned_lo
 #!/bin/sh
 if [ "\$1" = last_precommit ]; then
     : >"$TEST_TMP/recovery-hardlink-replacement-reached"
-    recovery=\$(find "$TEST_TMP/state/transactions" -name report-recovery.tsv -type f -print)
+    recovery=\$(find "$TEST_TMP/state/backups" -name report-recovery.tsv -type f -print)
     /bin/mv -- "\$recovery" "\$recovery.owned"
     printf 'foreign-recovery-link\n' >"\$recovery"
 fi
@@ -1979,8 +2116,8 @@ STUB
     DOTFILES_TEST_INSTALL_HOOK="$hook" run_cli install --apply --backup
     [[ "$CLI_STATUS" -ne 0 ]] || fail 'replaced recovery hardlink falsely committed' || return 1
     [[ -f "$TEST_TMP/recovery-hardlink-replacement-reached" ]] || fail 'recovery-link replacement seam was not reached' || return 1
-    foreign="$(find "$TEST_TMP/state/transactions" -name report-recovery.tsv -type f -print)"
-    recovery="$(find "$TEST_TMP/state/transactions" -name report-recovery.tsv.owned -type f -print)"
+    foreign="$(find "$TEST_TMP/state/backups" -name report-recovery.tsv -type f -print)"
+    recovery="$(find "$TEST_TMP/state/backups" -name report-recovery.tsv.owned -type f -print)"
     [[ -n "$foreign" && "$(<"$foreign")" == foreign-recovery-link ]] || fail 'foreign recovery-link replacement changed' || return 1
     [[ -n "$recovery" ]] || fail 'owned recovery hardlink was lost' || return 1
     grep -Fq $'MOVE_INTENT\t.config/demo/config\t' "$recovery" || return 1
@@ -2045,7 +2182,7 @@ STUB
     assert_not_exists "$TEST_TMP/hook-fd-inherited" || return 1
     assert_not_exists "$TEST_TMP/hook-fd-write-open" || return 1
     assert_not_exists "$TEST_TMP/hook-fd-seek-open" || return 1
-    recovery="$(find "$TEST_TMP/state/transactions" -name report-recovery.tsv -type f -print)"
+    recovery="$(find "$TEST_TMP/state/backups" -name report-recovery.tsv -type f -print)"
     [[ -n "$recovery" ]] || fail 'failed transaction did not retain recovery report' || return 1
     grep -Fq $'MOVE_INTENT\t.config/demo/config\t' "$recovery" || fail "prior recovery row was damaged: $(<"$recovery")" || return 1
     [[ "$(wc -l <"$recovery" | tr -d ' ')" == 1 ]] || fail "descriptor child changed report rows: $(<"$recovery")" || return 1
@@ -2054,7 +2191,7 @@ STUB
 }
 
 test_install_move_child_cannot_write_or_seek_report_fd() {
-    local move_stub report
+    local move_stub report recovery
     new_fixture
     mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
     printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
@@ -2101,7 +2238,34 @@ STUB
     [[ "$(awk -F '\t' '$1 == "MOVE_FINAL" { count++ } END { print count + 0 }' "$report")" == 1 ]] || return 1
     [[ "$(awk -F '\t' '$1 == "LINK" { count++ } END { print count + 0 }' "$report")" == 1 ]] || return 1
     [[ "$(<"$report")" != *move-fd-write* ]] || return 1
-    [[ -z "$(find "$TEST_TMP/state/transactions" -name report-recovery.tsv -print 2>/dev/null)" ]]
+    recovery="$(find "$TEST_TMP/state/backups" -name report-recovery.tsv -type f -print)"
+    [[ -n "$recovery" ]] || fail 'successful backup did not retain permanent recovery hardlink' || return 1
+    [[ "$(/usr/bin/stat -f '%d:%i' "$recovery")" == "$(/usr/bin/stat -f '%d:%i' "$report")" ]] || return 1
+    [[ "$(<"$recovery")" == "$(<"$report")" ]]
+}
+
+test_install_final_report_unlink_retains_backup_recovery_hardlink() {
+    local recovery report identity
+    new_fixture
+    mkdir -p "$TEST_TMP/repo/home/.config/demo" "$TEST_TMP/home/.config/demo"
+    printf 'canonical\n' >"$TEST_TMP/repo/home/.config/demo/config"
+    printf 'original\n' >"$TEST_TMP/home/.config/demo/config"
+    write_manifest 'demo|macos|file|.config/demo/config|plain|yes|1'
+
+    DOTFILES_TEST_REPORT_FINAL_UNLINK=1 run_cli install --apply --backup
+    assert_status 0 || return 1
+    report="$(find "$TEST_TMP/state/backups" -name report.tsv -type f -print)"
+    [[ -z "$report" ]] || fail 'final report-unlink injection did not remove the public name' || return 1
+    recovery="$(find "$TEST_TMP/state/backups" -name report-recovery.tsv -type f -print)"
+    [[ -n "$recovery" ]] || fail 'success after public unlink lost permanent recovery evidence' || return 1
+    identity="$(/usr/bin/stat -f '%d:%i' "$recovery")"
+    [[ -n "$identity" ]] || return 1
+    grep -Fq $'MOVE_INTENT\t.config/demo/config\t' "$recovery" || return 1
+    grep -Fq $'MOVE_FINAL\t.config/demo/config\t' "$recovery" || return 1
+    grep -Fq $'LINK\t.config/demo/config\t' "$recovery" || return 1
+    [[ -L "$TEST_TMP/home/.config/demo/config" && \
+        "$(readlink "$TEST_TMP/home/.config/demo/config")" == "$TEST_TMP/repo/home/.config/demo/config" ]] || return 1
+    [[ -z "$(find "$TEST_TMP/state/transactions" -mindepth 1 -print 2>/dev/null)" ]]
 }
 
 test_install_signal_at_final_verification_rolls_back_before_commit() {
@@ -3404,6 +3568,9 @@ run_test test_install_link_publish_pre_syscall_swap_retains_unowned_inode
 run_test test_install_backup_target_inside_mv_swap_restores_actual_inode
 run_test test_install_backup_publish_inside_mv_swap_restores_actual_inode
 run_test test_install_link_publish_inside_mv_swap_restores_actual_inode
+run_test test_install_backup_target_inside_mv_directory_with_same_named_child_is_ambiguous
+run_test test_install_bsd_no_clobber_directory_with_nested_entry_is_noop
+run_test test_install_inside_mv_ambiguous_replacement_preserves_all_arrivals
 run_test test_install_unowned_refresh_retains_file_symlink_and_directory_paths
 run_test test_install_final_verification_rejects_replaced_report_without_deleting_arrival
 run_test test_install_report_append_handle_does_not_write_foreign_replacement
@@ -3413,6 +3580,7 @@ run_test test_install_recovery_hardlink_directory_arrival_is_untouched
 run_test test_install_replaced_recovery_hardlink_fails_before_commit_and_reports_owned_location
 run_test test_install_hook_fd_is_closed_for_write_seek_and_surviving_descendant
 run_test test_install_move_child_cannot_write_or_seek_report_fd
+run_test test_install_final_report_unlink_retains_backup_recovery_hardlink
 run_test test_install_signal_at_final_verification_rolls_back_before_commit
 run_test test_install_after_link_publish_root_detach_refreshes_owned_location
 run_test test_install_after_backup_stage_nested_detach_refreshes_restore_location

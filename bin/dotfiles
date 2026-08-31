@@ -52,6 +52,7 @@ TRANSACTION_MOVE_STYLE=''; TRANSACTION_MOVE_COMMAND=''
 TRANSACTION_LINK_COMMAND=''
 MOVE_RESULT_PATH=''; MOVE_RESULT_PARENT_PHYSICAL=''; MOVE_RESULT_PARENT_IDENTITY=''
 MOVE_RESULT_IDENTITY=''; MOVE_RESULT_FINGERPRINT=''
+MOVE_RESULT_NOOP=0; MOVE_RESULT_AMBIGUOUS=0
 HYPRLAND_RUNTIME_PROBED=0; HYPRLAND_RUNTIME_STATUS=125; HYPRLAND_RUNTIME_DETAIL=''
 VERSION_APP=(); VERSION_VALUE=(); OBSERVED_VERSION=''
 
@@ -903,6 +904,7 @@ reset_transaction_journal() {
     REPORT_RECOVERY_PARENT_PHYSICAL=''; REPORT_RECOVERY_PARENT_IDENTITY=''
     REPORT_FD_OPEN=0; REPORT_WRITE_FAILED=0
     REPORT_EXPECTED_ROW=(); REPORT_EXPECTED_COUNT=0
+    MOVE_RESULT_NOOP=0; MOVE_RESULT_AMBIGUOUS=0
     TEST_FAIL_AFTER=''
     if [[ ${DOTFILES_TESTING:-0} == 1 ]]; then
         TEST_FAIL_AFTER=${DOTFILES_TEST_FAIL_AFTER:-}
@@ -987,6 +989,34 @@ capture_actual_move_candidate() (
         "$parent_identity" "$current_identity" "$current_fingerprint"
 )
 
+capture_move_prestate() {
+    local candidate=$1 identity fingerprint
+    if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
+        printf 'absent\t-\t-\n'
+        return 0
+    fi
+    identity=$(path_identity "$candidate") || return 1
+    fingerprint=$(move_artifact_fingerprint "$candidate") || return 1
+    printf 'present\t%s\t%s\n' "$identity" "$fingerprint"
+}
+
+set_move_result_from_info() {
+    IFS=$'\t' read -r MOVE_RESULT_PATH MOVE_RESULT_PARENT_PHYSICAL MOVE_RESULT_PARENT_IDENTITY \
+        MOVE_RESULT_IDENTITY MOVE_RESULT_FINGERPRINT <<<"$1"
+}
+
+record_move_ambiguity() {
+    local operation=$1 source=$2 destination=$3
+    MOVE_RESULT_AMBIGUOUS=1
+    printf '%s: MOVE_AMBIGUOUS operation=%s source=%s destination=%s; no candidate was selected\n' \
+        "$PROGRAM" "$operation" "$source" "$destination" >&2
+    (
+        cd -P -- "$STATE_ROOT_PHYSICAL" || exit 74
+        state_cwd_matches_pin || exit 74
+        append_report MOVE_AMBIGUOUS "$operation" "$source" "$destination"
+    )
+}
+
 select_transaction_primitives() {
     local kernel stat_command move_command link_command=/bin/link
     kernel=$(run_without_report_fd /usr/bin/uname -s 2>/dev/null) || return 74
@@ -1022,15 +1052,30 @@ select_transaction_primitives() {
 
 move_no_clobber_exact() {
     local source=$1 destination=$2 operation=${3:-generic} observed_identity observed_fingerprint
-    local command_status info candidate
+    local command_status info candidate nested candidate_count i expected_count=0 changed_count=0
+    local pre_present pre_identity pre_fingerprint source_expected=0 expected_new_arrival=0
+    local candidates=() pre_presence=() pre_identities=() pre_fingerprints=()
+    local actual_info=() actual_identities=() actual_fingerprints=() expected_indices=() changed_indices=()
     [[ $# -eq 2 || $# -eq 3 ]] || return 74
     MOVE_RESULT_PATH=''; MOVE_RESULT_PARENT_PHYSICAL=''; MOVE_RESULT_PARENT_IDENTITY=''
     MOVE_RESULT_IDENTITY=''; MOVE_RESULT_FINGERPRINT=''
+    MOVE_RESULT_NOOP=0; MOVE_RESULT_AMBIGUOUS=0
     install_test_hook move_before_syscall "$operation" "$source" "$destination" || return $?
-    observed_identity=$(path_identity "$source") || return 74
-    observed_fingerprint=$(move_artifact_fingerprint "$source") || return 74
-    MOVE_RESULT_IDENTITY=$observed_identity
-    MOVE_RESULT_FINGERPRINT=$observed_fingerprint
+    nested="$destination/${source##*/}"
+    candidates[0]=$source
+    candidates[1]=$destination
+    candidates[2]=$nested
+    candidate_count=${#candidates[@]}
+    for ((i=0; i<candidate_count; i++)); do
+        IFS=$'\t' read -r pre_present pre_identity pre_fingerprint \
+            <<<"$(capture_move_prestate "${candidates[$i]}")" || return 74
+        pre_presence[$i]=$pre_present
+        pre_identities[$i]=$pre_identity
+        pre_fingerprints[$i]=$pre_fingerprint
+    done
+    [[ "${pre_presence[0]}" == present ]] || return 74
+    observed_identity=${pre_identities[0]}
+    observed_fingerprint=${pre_fingerprints[0]}
     command_status=0
     case "$TRANSACTION_MOVE_STYLE" in
         bsd) run_without_report_fd "$TRANSACTION_MOVE_COMMAND" -h -n -- "$source" "$destination" || command_status=$? ;;
@@ -1038,13 +1083,59 @@ move_no_clobber_exact() {
         *) return 74 ;;
     esac
     [[ $command_status -eq 0 ]] || return "$command_status"
-    for candidate in "$destination/${source##*/}" "$destination" "$source"; do
+    for ((i=0; i<candidate_count; i++)); do
+        candidate=${candidates[$i]}
         info=$(capture_actual_move_candidate "$candidate") || info=''
+        actual_info[$i]=$info
         [[ -n "$info" ]] || continue
-        IFS=$'\t' read -r MOVE_RESULT_PATH MOVE_RESULT_PARENT_PHYSICAL MOVE_RESULT_PARENT_IDENTITY \
-            MOVE_RESULT_IDENTITY MOVE_RESULT_FINGERPRINT <<<"$info"
-        return 0
+        IFS=$'\t' read -r _ _ _ actual_identities[$i] actual_fingerprints[$i] <<<"$info"
+        if [[ "${actual_identities[$i]}" == "$observed_identity" && \
+            "${actual_fingerprints[$i]}" == "$observed_fingerprint" ]]; then
+            expected_indices[$expected_count]=$i
+            expected_count=$((expected_count + 1))
+            [[ $i -eq 0 ]] && source_expected=1
+        fi
+        if [[ "${pre_presence[$i]}" != present || \
+            "${pre_identities[$i]}" != "${actual_identities[$i]}" || \
+            "${pre_fingerprints[$i]}" != "${actual_fingerprints[$i]}" ]]; then
+            changed_indices[$changed_count]=$i
+            changed_count=$((changed_count + 1))
+        fi
     done
+
+    if [[ $source_expected -eq 1 ]]; then
+        for ((i=0; i<expected_count; i++)); do
+            candidate=${expected_indices[$i]}
+            [[ $candidate -eq 0 ]] && continue
+            if [[ "${pre_presence[$candidate]}" != present || \
+                "${pre_identities[$candidate]}" != "$observed_identity" || \
+                "${pre_fingerprints[$candidate]}" != "$observed_fingerprint" ]]; then
+                expected_new_arrival=1
+            fi
+        done
+        if [[ $expected_new_arrival -eq 0 ]]; then
+            set_move_result_from_info "${actual_info[0]}"
+            MOVE_RESULT_NOOP=1
+            printf '%s: MOVE_NOOP operation=%s source=%s destination=%s; source remained in place\n' \
+                "$PROGRAM" "$operation" "$source" "$destination" >&2
+            return 0
+        fi
+    fi
+
+    if [[ $expected_count -eq 1 ]]; then
+        set_move_result_from_info "${actual_info[${expected_indices[0]}]}"
+        return 0
+    fi
+    if [[ $changed_count -eq 0 ]]; then
+        MOVE_RESULT_IDENTITY=$observed_identity
+        MOVE_RESULT_FINGERPRINT=$observed_fingerprint
+        return 0
+    fi
+    if [[ $expected_count -gt 1 || $changed_count -gt 1 ]]; then
+        record_move_ambiguity "$operation" "$source" "$destination" || return 74
+        return 74
+    fi
+    set_move_result_from_info "${actual_info[${changed_indices[0]}]}"
     return 0
 }
 
@@ -1186,8 +1277,8 @@ begin_backup() {
     [[ -f "$REPORT_PATH" && ! -L "$REPORT_PATH" ]] || return 74
     REPORT_IDENTITY=$(path_identity "$REPORT_PATH") || return 74
     [[ -n "$REPORT_IDENTITY" ]] || return 74
-    REPORT_RECOVERY_PARENT_PHYSICAL="$STATE_ROOT_PHYSICAL/$TRANSACTION_ROOT"
-    REPORT_RECOVERY_PARENT_IDENTITY=$(path_identity "$TRANSACTION_ROOT") || return 74
+    REPORT_RECOVERY_PARENT_PHYSICAL="$STATE_ROOT_PHYSICAL/$BACKUP_ROOT"
+    REPORT_RECOVERY_PARENT_IDENTITY=$(path_identity "$BACKUP_ROOT") || return 74
     REPORT_RECOVERY_PATH="$REPORT_RECOVERY_PARENT_PHYSICAL/report-recovery.tsv"
     [[ ! -e "$REPORT_RECOVERY_PATH" && ! -L "$REPORT_RECOVERY_PATH" ]] || return 74
     install_test_hook report_recovery_before_link "$REPORT_RECOVERY_PATH" || return $?
@@ -1229,6 +1320,7 @@ locate_report_recovery_link() (
     [[ "$parent_identity" == "$REPORT_RECOVERY_PARENT_IDENTITY" ]] || return 1
     shopt -s dotglob nullglob
     for candidate in ./*; do
+        [[ "${candidate#./}" != "${REPORT_PATH##*/}" ]] || continue
         [[ -f "$candidate" && ! -L "$candidate" ]] || continue
         identity=$(path_identity "$candidate") || continue
         [[ "$identity" == "$REPORT_RECOVERY_IDENTITY" ]] || continue
@@ -1280,15 +1372,6 @@ diagnose_report_recovery() {
     fi
 }
 
-remove_report_recovery_link() {
-    [[ -n "$REPORT_RECOVERY_PATH" ]] || return 0
-    state_cwd_matches_pin && report_path_matches_pin && report_recovery_path_matches_pin || return 74
-    run_without_report_fd /bin/unlink "$REPORT_RECOVERY_PATH" || return 74
-    [[ ! -e "$REPORT_RECOVERY_PATH" && ! -L "$REPORT_RECOVERY_PATH" ]] || return 74
-    REPORT_RECOVERY_PATH=''
-    REPORT_RECOVERY_IDENTITY=''
-}
-
 append_report() {
     local record_type=$1 row partial_length partial
     [[ -n "$REPORT_PATH" ]] || return 0
@@ -1322,33 +1405,56 @@ expected_report_content() {
     done
 }
 
-verify_report_postcondition() {
-    local identity expected_checksum actual_checksum line i=0
-    [[ -n "$REPORT_PATH" ]] || return 0
-    [[ "$REPORT_FD_OPEN" == 1 && "$REPORT_WRITE_FAILED" == 0 ]] || return 74
-    state_cwd_matches_pin || return 74
-    [[ -f "$REPORT_PATH" && ! -L "$REPORT_PATH" ]] || {
-        printf '%s: backup report is not the pinned regular file\n' "$PROGRAM" >&2; return 74;
+verify_report_content_at() {
+    local report_path=$1 expected_identity=$2 label=$3 identity expected_checksum actual_checksum line i=0
+    [[ -f "$report_path" && ! -L "$report_path" ]] || {
+        printf '%s: %s is not the pinned regular file\n' "$PROGRAM" "$label" >&2; return 74;
     }
-    identity=$(path_identity "$REPORT_PATH") || return 74
-    [[ "$identity" == "$REPORT_IDENTITY" ]] || {
-        printf '%s: backup report identity changed\n' "$PROGRAM" >&2; return 74;
-    }
-    report_recovery_path_matches_pin || {
-        printf '%s: backup report recovery link identity changed\n' "$PROGRAM" >&2; return 74;
+    identity=$(path_identity "$report_path") || return 74
+    [[ "$identity" == "$expected_identity" ]] || {
+        printf '%s: %s identity changed\n' "$PROGRAM" "$label" >&2; return 74;
     }
     expected_checksum=$(expected_report_content | run_without_report_fd cksum) || return 74
-    actual_checksum=$(run_without_report_fd cksum <"$REPORT_PATH") || return 74
+    actual_checksum=$(run_without_report_fd cksum <"$report_path") || return 74
     [[ "$actual_checksum" == "$expected_checksum" ]] || {
-        printf '%s: backup report content changed\n' "$PROGRAM" >&2; return 74;
+        printf '%s: %s content changed\n' "$PROGRAM" "$label" >&2; return 74;
     }
     while IFS= read -r line; do
         [[ $i -lt $REPORT_EXPECTED_COUNT && "$line" == "${REPORT_EXPECTED_ROW[$i]}" ]] || return 74
         i=$((i + 1))
-    done <"$REPORT_PATH"
+    done <"$report_path"
     [[ $i -eq $REPORT_EXPECTED_COUNT ]] || return 74
-    identity=$(path_identity "$REPORT_PATH") || return 74
-    [[ "$identity" == "$REPORT_IDENTITY" ]]
+    identity=$(path_identity "$report_path") || return 74
+    [[ "$identity" == "$expected_identity" ]]
+}
+
+verify_report_postcondition() {
+    [[ -n "$REPORT_PATH" ]] || return 0
+    [[ "$REPORT_FD_OPEN" == 1 && "$REPORT_WRITE_FAILED" == 0 ]] || return 74
+    state_cwd_matches_pin || return 74
+    report_path_matches_pin || return 74
+    report_recovery_path_matches_pin || {
+        printf '%s: backup report recovery link identity changed\n' "$PROGRAM" >&2; return 74;
+    }
+    verify_report_content_at "$REPORT_PATH" "$REPORT_IDENTITY" 'backup report' || return $?
+    verify_report_content_at "$REPORT_RECOVERY_PATH" "$REPORT_RECOVERY_IDENTITY" \
+        'backup report recovery link'
+}
+
+verify_report_recovery_postcondition() {
+    [[ -n "$REPORT_RECOVERY_PATH" ]] || return 0
+    [[ "$REPORT_FD_OPEN" == 1 && "$REPORT_WRITE_FAILED" == 0 ]] || return 74
+    state_cwd_matches_pin || return 74
+    report_recovery_path_matches_pin || return 74
+    verify_report_content_at "$REPORT_RECOVERY_PATH" "$REPORT_RECOVERY_IDENTITY" \
+        'backup report recovery link'
+}
+
+test_unlink_public_report_after_final_verification() {
+    [[ ${DOTFILES_TESTING:-0} == 1 && ${DOTFILES_TEST_REPORT_FINAL_UNLINK:-0} == 1 ]] || return 0
+    report_path_matches_pin && report_recovery_path_matches_pin || return 74
+    run_without_report_fd /bin/unlink "$REPORT_PATH" || return 74
+    [[ ! -e "$REPORT_PATH" && ! -L "$REPORT_PATH" ]]
 }
 
 journal_move() {
@@ -2767,7 +2873,13 @@ commit_transaction() {
 finish_transaction() {
     local status=0
     [[ "$TRANSACTION_ACTIVE" == 0 ]] || return 74
-    remove_report_recovery_link || status=$?
+    test_unlink_public_report_after_final_verification || status=$?
+    if [[ $status -ne 0 ]]; then
+        diagnose_report_recovery || true
+    fi
+    if [[ $status -eq 0 ]]; then
+        verify_report_recovery_postcondition || status=$?
+    fi
     if [[ $status -ne 0 ]]; then
         diagnose_report_recovery || true
     fi
