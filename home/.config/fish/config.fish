@@ -62,7 +62,7 @@ if status is-interactive
         alias lg lazygit
     end
 
-    alias clauded "claude --agent controller --model fable --effort medium --dangerously-skip-permissions"
+    alias clauded "claude --dangerously-skip-permissions"
 end
 
 # No greeting.
