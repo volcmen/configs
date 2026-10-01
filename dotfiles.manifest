@@ -4,6 +4,7 @@ fish|macos,arch|file|.config/fish/config.fish|fish|yes|4.8.1
 fontconfig|macos,arch|file|.config/fontconfig/fonts.conf|fontconfig|yes|2.18.3
 fontconfig|macos,arch|file|.config/fontconfig/conf.d/99-readability.conf|fontconfig|yes|2.18.3
 git|macos,arch|file|.config/git/config|git|yes|2.55.0
+git|macos,arch|file|.config/git/notraffic|git|yes|2.55.0
 kitty|macos,arch|file|.config/kitty/current-theme.conf|kitty|yes|0.47.2
 kitty|macos,arch|file|.config/kitty/kitty.conf|kitty|yes|0.47.2
 kitty|macos,arch|file|.config/kitty/pager.sh|shell|yes|0.47.2

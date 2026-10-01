@@ -53,3 +53,9 @@
 
 [fetch]
 	prune = true
+[guard]
+	email = david.david@notraffic.tech
+	email = volcmen@gmail.com
+
+[includeIf "gitdir:~/notraffic/"]
+	path = ~/.config/git/notraffic
