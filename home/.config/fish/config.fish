@@ -11,6 +11,10 @@ if test -d /opt/homebrew/bin
     fish_add_path --path --move --prepend /opt/homebrew/bin
 end
 
+if test -d "$HOME/.local/share/sbg/shims"
+    fish_add_path --path --move --prepend "$HOME/.local/share/sbg/shims"
+end
+
 if status is-interactive
     if command -q starship
         starship init fish | source
@@ -67,3 +71,5 @@ end
 
 # No greeting.
 set -g fish_greeting
+
+set -gx SOPS_AGE_KEY_FILE $HOME/.config/sops/age/keys.txt
